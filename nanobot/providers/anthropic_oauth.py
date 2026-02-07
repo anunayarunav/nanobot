@@ -56,12 +56,8 @@ class AnthropicOAuthProvider(LLMProvider):
             "--output-format", "json",
         ]
 
-        env = {
-            "CLAUDE_CODE_OAUTH_TOKEN": self.oauth_token,
-            "CLAUDE_CODE_ENTRYPOINT": "cli",
-            "HOME": __import__("os").environ.get("HOME", "/tmp"),
-            "PATH": __import__("os").environ.get("PATH", "/usr/bin:/bin"),
-        }
+        import os
+        env = {**os.environ, "CLAUDE_CODE_OAUTH_TOKEN": self.oauth_token, "CLAUDE_CODE_ENTRYPOINT": "cli"}
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -75,7 +71,7 @@ class AnthropicOAuthProvider(LLMProvider):
             )
 
             if proc.returncode != 0:
-                err = stderr.decode().strip()
+                err = stderr.decode().strip() or stdout.decode().strip()
                 logger.error(f"Claude CLI error (exit {proc.returncode}): {err}")
                 return LLMResponse(
                     content=f"Claude CLI error: {err}",
