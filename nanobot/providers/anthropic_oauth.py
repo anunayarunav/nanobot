@@ -54,6 +54,7 @@ class AnthropicOAuthProvider(LLMProvider):
             "-p", prompt,
             "--model", model,
             "--output-format", "json",
+            "--dangerously-skip-permissions",
         ]
 
         import os
