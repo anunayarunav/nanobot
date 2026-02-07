@@ -1,0 +1,30 @@
+[Unit]
+Description=Nanobot - Master Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+
+Environment=HOME=/home/deploy/bots/master
+
+ExecStart=/home/deploy/nanobot/venv/bin/nanobot gateway
+
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Master bot needs broader access to manage other instances
+# NoNewPrivileges must be false so sudo works (for systemctl)
+NoNewPrivileges=false
+ProtectSystem=false
+ProtectHome=false
+
+# No memory limit for master (it manages everything)
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

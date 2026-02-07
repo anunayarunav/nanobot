@@ -1,0 +1,33 @@
+[Unit]
+Description=Nanobot - %i project
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+
+# The HOME trick: each instance gets its own config, workspace, sessions
+Environment=HOME=/home/deploy/bots/%i
+
+# Find nanobot binary (installed via pip)
+ExecStart=/home/deploy/nanobot/venv/bin/nanobot gateway
+
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=false
+ReadWritePaths=/home/deploy/bots/%i
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

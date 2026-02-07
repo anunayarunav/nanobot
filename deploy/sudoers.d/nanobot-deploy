@@ -1,0 +1,16 @@
+# /etc/sudoers.d/nanobot-deploy
+# Allow deploy user to manage nanobot services without password
+# Tightly scoped: only nanobot@ template services + daemon-reload + journalctl
+
+deploy ALL=(ALL) NOPASSWD: /usr/bin/systemctl start nanobot@*
+deploy ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop nanobot@*
+deploy ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart nanobot@*
+deploy ALL=(ALL) NOPASSWD: /usr/bin/systemctl enable nanobot@*
+deploy ALL=(ALL) NOPASSWD: /usr/bin/systemctl disable nanobot@*
+deploy ALL=(ALL) NOPASSWD: /usr/bin/systemctl status nanobot@*
+deploy ALL=(ALL) NOPASSWD: /usr/bin/systemctl is-active nanobot@*
+deploy ALL=(ALL) NOPASSWD: /usr/bin/systemctl show nanobot@*
+deploy ALL=(ALL) NOPASSWD: /usr/bin/systemctl daemon-reload
+deploy ALL=(ALL) NOPASSWD: /usr/bin/journalctl -u nanobot@*
+deploy ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /etc/systemd/system/nanobot@*.service.d
+deploy ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /etc/systemd/system/nanobot@*.service.d/
