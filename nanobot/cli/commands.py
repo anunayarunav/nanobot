@@ -156,12 +156,16 @@ def _make_provider(config):
     # Use AnthropicOAuthProvider if OAuth token is configured
     if p and p.oauth_access_token:
         from nanobot.providers.anthropic_oauth import AnthropicOAuthProvider
+        from nanobot.config.loader import get_config_path
+        # Store refreshed tokens in a separate cache file next to config
+        token_cache = str(get_config_path().parent / ".oauth_tokens.json")
         console.print("[green]✓[/green] Using Anthropic OAuth (Claude Pro/Max)")
         return AnthropicOAuthProvider(
             access_token=p.oauth_access_token,
             refresh_token=p.oauth_refresh_token,
             expires_at=p.oauth_expires_at,
             default_model=model,
+            credentials_path=token_cache,
         )
 
     # Auto-detect OAuth from OpenClaw or Claude CLI when model is anthropic/claude

@@ -54,6 +54,27 @@ class AnthropicOAuthProvider(LLMProvider):
         self.credentials_path = credentials_path
         self._client = httpx.AsyncClient(timeout=120.0)
 
+        # Load cached tokens if available (from previous refresh)
+        if credentials_path:
+            self._load_cached_tokens()
+
+    def _load_cached_tokens(self) -> None:
+        """Load previously refreshed tokens from cache file."""
+        try:
+            p = Path(self.credentials_path)
+            if not p.exists():
+                return
+            data = json.loads(p.read_text())
+            cached_at = data.get("expires_at", 0)
+            # Use cached tokens only if they're newer than what we have
+            if cached_at > self.expires_at:
+                self.access_token = data["access_token"]
+                self.refresh_token = data.get("refresh_token", self.refresh_token)
+                self.expires_at = cached_at
+                logger.info("Loaded refreshed OAuth tokens from cache")
+        except Exception as e:
+            logger.debug(f"No cached OAuth tokens: {e}")
+
     async def _ensure_valid_token(self) -> str:
         """Return a valid access token, refreshing if expired."""
         if self.refresh_token and self.expires_at and time.time() * 1000 > self.expires_at:
