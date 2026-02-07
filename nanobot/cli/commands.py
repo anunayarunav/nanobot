@@ -155,28 +155,18 @@ def _make_provider(config):
 
     # Use AnthropicOAuthProvider if OAuth token is configured
     if p and p.oauth_access_token:
+        import shutil
         from nanobot.providers.anthropic_oauth import AnthropicOAuthProvider
-        from nanobot.config.loader import get_config_path
-        # Store refreshed tokens in a separate cache file next to config
-        token_cache = str(get_config_path().parent / ".oauth_tokens.json")
-        console.print("[green]✓[/green] Using Anthropic OAuth (Claude Pro/Max)")
+        claude_bin = shutil.which("claude")
+        if not claude_bin:
+            console.print("[red]Error: Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code[/red]")
+            raise typer.Exit(1)
+        console.print("[green]✓[/green] Using Anthropic OAuth via Claude CLI")
         return AnthropicOAuthProvider(
-            access_token=p.oauth_access_token,
-            refresh_token=p.oauth_refresh_token,
-            expires_at=p.oauth_expires_at,
+            oauth_token=p.oauth_access_token,
             default_model=model,
-            credentials_path=token_cache,
+            claude_bin=claude_bin,
         )
-
-    # Auto-detect OAuth from OpenClaw or Claude CLI when model is anthropic/claude
-    if (not p or not p.api_key) and ("anthropic" in model.lower() or "claude" in model.lower()):
-        from nanobot.providers.anthropic_oauth import AnthropicOAuthProvider
-        oauth = AnthropicOAuthProvider.from_openclaw(default_model=model)
-        if not oauth:
-            oauth = AnthropicOAuthProvider.from_claude_cli(default_model=model)
-        if oauth:
-            console.print("[green]✓[/green] Using Anthropic OAuth (auto-detected)")
-            return oauth
 
     if not (p and p.api_key) and not model.startswith("bedrock/"):
         console.print("[red]Error: No API key configured.[/red]")

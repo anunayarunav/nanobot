@@ -66,10 +66,8 @@ class ProviderConfig(BaseModel):
     api_key: str = ""
     api_base: str | None = None
     extra_headers: dict[str, str] | None = None  # Custom headers (e.g. APP-Code for AiHubMix)
-    # OAuth fields (for Anthropic Claude Pro/Max subscription tokens)
+    # OAuth token from `claude setup-token` (for Claude Pro/Max subscription)
     oauth_access_token: str = ""
-    oauth_refresh_token: str = ""
-    oauth_expires_at: int = 0
 
 
 class ProvidersConfig(BaseModel):
