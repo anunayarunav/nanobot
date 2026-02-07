@@ -54,7 +54,6 @@ class AnthropicOAuthProvider(LLMProvider):
             "-p", prompt,
             "--model", model,
             "--output-format", "json",
-            "--max-budget-usd", "0",  # no budget limit per call
         ]
 
         env = {
