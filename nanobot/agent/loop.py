@@ -45,8 +45,9 @@ class AgentLoop:
         exec_config: "ExecToolConfig | None" = None,
         cron_service: "CronService | None" = None,
         restrict_to_workspace: bool = False,
+        config: "Config | None" = None,
     ):
-        from nanobot.config.schema import ExecToolConfig
+        from nanobot.config.schema import ExecToolConfig, Config
         from nanobot.cron.service import CronService
         self.bus = bus
         self.provider = provider
@@ -57,6 +58,7 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+        self.config = config
         
         self.context = ContextBuilder(workspace)
         self.sessions = SessionManager(workspace)
@@ -154,7 +156,12 @@ class AgentLoop:
         # The chat_id contains the original "channel:chat_id" to route back to
         if msg.channel == "system":
             return await self._process_system_message(msg)
-        
+
+        # Handle /model command
+        if msg.content.strip().startswith("/model"):
+            result = self._handle_model_command(msg.content.strip())
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=result)
+
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
         
@@ -246,6 +253,104 @@ class AgentLoop:
             content=final_content
         )
     
+    def _handle_model_command(self, text: str) -> str:
+        """Handle /model command. Returns a status message."""
+        parts = text.split(None, 1)
+        if len(parts) == 1:
+            # Just "/model" — show current and available
+            return self._model_status()
+
+        target = parts[1].strip()
+        if not self.config:
+            return f"Current model: `{self.model}`\n\nModel switching unavailable (no config loaded)."
+
+        # Aliases for quick switching
+        aliases = {
+            "cc": ("anthropic/claude-sonnet-4-5-20250929", "oauth"),
+            "claude-code": ("anthropic/claude-sonnet-4-5-20250929", "oauth"),
+            "opus": ("anthropic/claude-opus-4-6", "oauth"),
+            "sonnet": ("anthropic/claude-sonnet-4-5-20250929", "oauth"),
+            "gemini": ("gemini/gemini-2.5-pro-preview-06-05", "api"),
+            "flash": ("gemini/gemini-2.5-flash-preview-05-20", "api"),
+            "claude": ("anthropic/claude-sonnet-4-5-20250929", "api"),
+        }
+
+        if target.lower() in aliases:
+            model, mode = aliases[target.lower()]
+        else:
+            # Explicit model name — detect mode from model name
+            model = target
+            mode = "oauth" if self.config.providers.anthropic.oauth_access_token and "anthropic" in model.lower() else "api"
+
+        try:
+            provider = self._make_provider_for_model(model, mode)
+            self.provider = provider
+            self.model = model
+            # Update subagents too
+            self.subagents.provider = provider
+            self.subagents.model = model
+            logger.info(f"Switched to model: {model} (mode: {mode})")
+            label = "Claude Code (OAuth)" if mode == "oauth" else "API key"
+            return f"Switched to `{model}` via {label}"
+        except Exception as e:
+            logger.error(f"Failed to switch model: {e}")
+            return f"Failed to switch model: {e}"
+
+    def _model_status(self) -> str:
+        """Show current model and available options."""
+        lines = [f"Current model: `{self.model}`", ""]
+        if self.config:
+            p = self.config.providers
+            lines.append("Available shortcuts:")
+            if p.anthropic.oauth_access_token:
+                lines.append("  `/model opus` — Claude Opus 4.6 (OAuth/CLI)")
+                lines.append("  `/model sonnet` — Claude Sonnet 4.5 (OAuth/CLI)")
+                lines.append("  `/model cc` — alias for sonnet via Claude Code")
+            if p.anthropic.api_key:
+                lines.append("  `/model claude` — Claude Sonnet 4.5 (API key)")
+            if p.gemini.api_key:
+                lines.append("  `/model gemini` — Gemini 2.5 Pro")
+                lines.append("  `/model flash` — Gemini 2.5 Flash")
+            lines.append("")
+            lines.append("Or use an explicit model: `/model anthropic/claude-opus-4-6`")
+        return "\n".join(lines)
+
+    def _make_provider_for_model(self, model: str, mode: str = "api") -> LLMProvider:
+        """Create the right provider for a given model and mode."""
+        if not self.config:
+            raise ValueError("No config available")
+
+        p = self.config.providers
+        model_lower = model.lower()
+
+        # OAuth mode — use Claude CLI proxy
+        if mode == "oauth":
+            if not p.anthropic.oauth_access_token:
+                raise ValueError("No OAuth token configured for Anthropic")
+            import shutil
+            from nanobot.providers.anthropic_oauth import AnthropicOAuthProvider
+            claude_bin = shutil.which("claude") or "claude"
+            return AnthropicOAuthProvider(
+                oauth_token=p.anthropic.oauth_access_token,
+                default_model=model,
+                claude_bin=claude_bin,
+            )
+
+        # API key mode — use LiteLLM
+        from nanobot.providers.litellm_provider import LiteLLMProvider
+
+        # Find the right provider config for the target model
+        provider_cfg = self.config.get_provider(model)
+        if not provider_cfg or not provider_cfg.api_key:
+            raise ValueError(f"No API key configured for model `{model}`")
+
+        return LiteLLMProvider(
+            api_key=provider_cfg.api_key,
+            api_base=self.config.get_api_base(model),
+            default_model=model,
+            extra_headers=provider_cfg.extra_headers or {},
+        )
+
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
         Process a system message (e.g., subagent announce).
