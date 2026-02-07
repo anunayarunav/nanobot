@@ -124,12 +124,18 @@ class AnthropicOAuthProvider(LLMProvider):
             "Authorization": f"Bearer {token}",
         }
 
+        # Convert OpenAI-format messages to Anthropic format
+        system_prompt, anthropic_messages = self._convert_messages(messages)
+
         payload: dict[str, Any] = {
             "model": model,
-            "messages": messages,
+            "messages": anthropic_messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+
+        if system_prompt:
+            payload["system"] = system_prompt
 
         if tools:
             payload["tools"] = self._convert_tools(tools)
@@ -151,6 +157,60 @@ class AnthropicOAuthProvider(LLMProvider):
                 content=f"Error calling Anthropic API: {str(e)}",
                 finish_reason="error",
             )
+
+    @staticmethod
+    def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+        """Convert OpenAI-format messages to Anthropic format.
+
+        Returns (system_prompt, anthropic_messages).
+        Handles: system→top-level, tool→tool_result, assistant tool_calls→tool_use.
+        """
+        system_parts: list[str] = []
+        result: list[dict[str, Any]] = []
+
+        for msg in messages:
+            role = msg.get("role", "")
+
+            if role == "system":
+                system_parts.append(msg.get("content", ""))
+
+            elif role == "user":
+                result.append({"role": "user", "content": msg.get("content", "")})
+
+            elif role == "assistant":
+                content_blocks: list[dict[str, Any]] = []
+                text = msg.get("content")
+                if text:
+                    content_blocks.append({"type": "text", "text": text})
+                for tc in msg.get("tool_calls", []):
+                    func = tc.get("function", {})
+                    args = func.get("arguments", {})
+                    # arguments may be a JSON string from OpenAI format
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except (json.JSONDecodeError, TypeError):
+                            args = {"raw": args}
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": tc.get("id", ""),
+                        "name": func.get("name", ""),
+                        "input": args,
+                    })
+                result.append({"role": "assistant", "content": content_blocks or text or ""})
+
+            elif role == "tool":
+                # Anthropic expects tool_result as a user message
+                result.append({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": msg.get("tool_call_id", ""),
+                        "content": msg.get("content", ""),
+                    }],
+                })
+
+        return "\n\n".join(system_parts), result
 
     @staticmethod
     def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
