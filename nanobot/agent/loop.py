@@ -90,6 +90,7 @@ class AgentLoop:
             working_dir=str(self.workspace),
             timeout=self.exec_config.timeout,
             restrict_to_workspace=self.restrict_to_workspace,
+            allowed_git_repos=self.exec_config.allowed_git_repos,
         ))
         
         # Web tools
@@ -280,7 +281,9 @@ class AgentLoop:
         else:
             # Explicit model name — detect mode from model name
             model = target
-            mode = "oauth" if self.config.providers.anthropic.oauth_access_token and "anthropic" in model.lower() else "api"
+            import os
+            has_oauth = self.config.providers.anthropic.oauth_access_token or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+            mode = "oauth" if has_oauth and "anthropic" in model.lower() else "api"
 
         try:
             provider = self._make_provider_for_model(model, mode)
@@ -302,7 +305,9 @@ class AgentLoop:
         if self.config:
             p = self.config.providers
             lines.append("Available shortcuts:")
-            if p.anthropic.oauth_access_token:
+            import os
+            has_oauth = p.anthropic.oauth_access_token or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+            if has_oauth:
                 lines.append("  `/model opus` — Claude Opus 4.6 (OAuth/CLI)")
                 lines.append("  `/model sonnet` — Claude Sonnet 4.5 (OAuth/CLI)")
                 lines.append("  `/model cc` — alias for sonnet via Claude Code")
@@ -325,13 +330,15 @@ class AgentLoop:
 
         # OAuth mode — use Claude CLI proxy
         if mode == "oauth":
-            if not p.anthropic.oauth_access_token:
+            import os
+            oauth_token = p.anthropic.oauth_access_token or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+            if not oauth_token:
                 raise ValueError("No OAuth token configured for Anthropic")
             import shutil
             from nanobot.providers.anthropic_oauth import AnthropicOAuthProvider
             claude_bin = shutil.which("claude") or "claude"
             return AnthropicOAuthProvider(
-                oauth_token=p.anthropic.oauth_access_token,
+                oauth_token=oauth_token,
                 default_model=model,
                 claude_bin=claude_bin,
             )

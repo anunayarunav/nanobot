@@ -105,6 +105,7 @@ class WebToolsConfig(BaseModel):
 class ExecToolConfig(BaseModel):
     """Shell exec tool configuration."""
     timeout: int = 60
+    allowed_git_repos: list[str] = Field(default_factory=list)  # Whitelist for git clone (e.g. "github.com/user/*")
 
 
 class ToolsConfig(BaseModel):

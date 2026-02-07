@@ -149,12 +149,14 @@ This file stores important information that should persist across sessions.
 
 def _make_provider(config):
     """Create LLM provider from config. Uses OAuth if configured, else LiteLLM."""
+    import os
     from nanobot.providers.litellm_provider import LiteLLMProvider
     p = config.get_provider()
     model = config.agents.defaults.model
 
-    # Use AnthropicOAuthProvider if OAuth token is configured
-    if p and p.oauth_access_token:
+    # Use AnthropicOAuthProvider if OAuth token is configured (config or env var)
+    oauth_token = (p.oauth_access_token if p else "") or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+    if oauth_token:
         import shutil
         from nanobot.providers.anthropic_oauth import AnthropicOAuthProvider
         claude_bin = shutil.which("claude")
@@ -163,7 +165,7 @@ def _make_provider(config):
             raise typer.Exit(1)
         console.print("[green]✓[/green] Using Anthropic OAuth via Claude CLI")
         return AnthropicOAuthProvider(
-            oauth_token=p.oauth_access_token,
+            oauth_token=oauth_token,
             default_model=model,
             claude_bin=claude_bin,
         )

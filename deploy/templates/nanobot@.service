@@ -11,6 +11,9 @@ Group=deploy
 # The HOME trick: each instance gets its own config, workspace, sessions
 Environment=HOME=/home/deploy/bots/%i
 
+# Shared secrets (OAuth token, etc.) — dash prefix means optional
+EnvironmentFile=-/home/deploy/shared/secrets.env
+
 # Find nanobot binary (installed via pip)
 ExecStart=/home/deploy/nanobot/venv/bin/nanobot gateway
 

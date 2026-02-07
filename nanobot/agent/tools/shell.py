@@ -1,6 +1,7 @@
 """Shell execution tool."""
 
 import asyncio
+import fnmatch
 import os
 import re
 from pathlib import Path
@@ -11,7 +12,7 @@ from nanobot.agent.tools.base import Tool
 
 class ExecTool(Tool):
     """Tool to execute shell commands."""
-    
+
     def __init__(
         self,
         timeout: int = 60,
@@ -19,6 +20,7 @@ class ExecTool(Tool):
         deny_patterns: list[str] | None = None,
         allow_patterns: list[str] | None = None,
         restrict_to_workspace: bool = False,
+        allowed_git_repos: list[str] | None = None,
     ):
         self.timeout = timeout
         self.working_dir = working_dir
@@ -34,6 +36,7 @@ class ExecTool(Tool):
         ]
         self.allow_patterns = allow_patterns or []
         self.restrict_to_workspace = restrict_to_workspace
+        self.allowed_git_repos = allowed_git_repos or []
     
     @property
     def name(self) -> str:
@@ -121,14 +124,23 @@ class ExecTool(Tool):
             if not any(re.search(p, lower) for p in self.allow_patterns):
                 return "Error: Command blocked by safety guard (not in allowlist)"
 
+        # Git clone gets special handling: whitelist check + destination check
+        git_clone_match = re.match(r"git\s+clone\s+(\S+)(?:\s+(\S+))?", cmd)
+        if git_clone_match:
+            return self._guard_git_clone(git_clone_match.group(1), git_clone_match.group(2), cwd)
+
         if self.restrict_to_workspace:
             if "..\\" in cmd or "../" in cmd:
                 return "Error: Command blocked by safety guard (path traversal detected)"
 
             cwd_path = Path(cwd).resolve()
 
-            win_paths = re.findall(r"[A-Za-z]:\\[^\\\"']+", cmd)
-            posix_paths = re.findall(r"/[^\s\"']+", cmd)
+            # Strip URLs before extracting filesystem paths to avoid false positives
+            cmd_no_urls = re.sub(r"[a-z+]+://\S+", "", cmd)  # https://, git://, ssh://
+            cmd_no_urls = re.sub(r"\S+@\S+:\S+", "", cmd_no_urls)  # git@host:path
+
+            win_paths = re.findall(r"[A-Za-z]:\\[^\\\"']+", cmd_no_urls)
+            posix_paths = re.findall(r"/[^\s\"']+", cmd_no_urls)
 
             for raw in win_paths + posix_paths:
                 try:
@@ -139,3 +151,39 @@ class ExecTool(Tool):
                     return "Error: Command blocked by safety guard (path outside working dir)"
 
         return None
+
+    def _guard_git_clone(self, url: str, dest: str | None, cwd: str) -> str | None:
+        """Guard git clone: check repo whitelist and destination path."""
+        if not self._is_git_repo_allowed(url):
+            hint = ", ".join(self.allowed_git_repos) if self.allowed_git_repos else "none configured"
+            return f"Error: Repository not in allowlist. Allowed: {hint}"
+
+        # Destination must be within workspace (if restrict_to_workspace is on)
+        if self.restrict_to_workspace and dest:
+            cwd_path = Path(cwd).resolve()
+            try:
+                dest_path = Path(dest).resolve() if dest.startswith("/") else (cwd_path / dest).resolve()
+                if cwd_path not in dest_path.parents and dest_path != cwd_path:
+                    return "Error: Clone destination must be within workspace"
+            except Exception:
+                pass
+
+        return None
+
+    def _is_git_repo_allowed(self, url: str) -> bool:
+        """Check if a git repo URL matches the allowed_git_repos whitelist."""
+        if not self.allowed_git_repos:
+            return False
+
+        # Normalize: strip scheme and user prefix, unify separators
+        normalized = re.sub(r"^[a-z+]+://", "", url)  # https://, git+ssh://
+        normalized = re.sub(r"^[^@]+@", "", normalized)  # git@github.com:...
+        normalized = normalized.replace(":", "/", 1)  # github.com:user/repo
+        normalized = normalized.rstrip("/")
+        if normalized.endswith(".git"):
+            normalized = normalized[:-4]
+
+        for pattern in self.allowed_git_repos:
+            if fnmatch.fnmatch(normalized, pattern.rstrip("/")):
+                return True
+        return False
