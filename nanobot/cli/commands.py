@@ -148,10 +148,32 @@ This file stores important information that should persist across sessions.
 
 
 def _make_provider(config):
-    """Create LiteLLMProvider from config. Exits if no API key found."""
+    """Create LLM provider from config. Uses OAuth if configured, else LiteLLM."""
     from nanobot.providers.litellm_provider import LiteLLMProvider
     p = config.get_provider()
     model = config.agents.defaults.model
+
+    # Use AnthropicOAuthProvider if OAuth token is configured
+    if p and p.oauth_access_token:
+        from nanobot.providers.anthropic_oauth import AnthropicOAuthProvider
+        console.print("[green]✓[/green] Using Anthropic OAuth (Claude Pro/Max)")
+        return AnthropicOAuthProvider(
+            access_token=p.oauth_access_token,
+            refresh_token=p.oauth_refresh_token,
+            expires_at=p.oauth_expires_at,
+            default_model=model,
+        )
+
+    # Auto-detect OAuth from OpenClaw or Claude CLI when model is anthropic/claude
+    if (not p or not p.api_key) and ("anthropic" in model.lower() or "claude" in model.lower()):
+        from nanobot.providers.anthropic_oauth import AnthropicOAuthProvider
+        oauth = AnthropicOAuthProvider.from_openclaw(default_model=model)
+        if not oauth:
+            oauth = AnthropicOAuthProvider.from_claude_cli(default_model=model)
+        if oauth:
+            console.print("[green]✓[/green] Using Anthropic OAuth (auto-detected)")
+            return oauth
+
     if not (p and p.api_key) and not model.startswith("bedrock/"):
         console.print("[red]Error: No API key configured.[/red]")
         console.print("Set one in ~/.nanobot/config.json under providers section")
@@ -636,7 +658,7 @@ def status():
         
         # Check API keys
         has_openrouter = bool(config.providers.openrouter.api_key)
-        has_anthropic = bool(config.providers.anthropic.api_key)
+        has_anthropic = bool(config.providers.anthropic.api_key or config.providers.anthropic.oauth_access_token)
         has_openai = bool(config.providers.openai.api_key)
         has_gemini = bool(config.providers.gemini.api_key)
         has_zhipu = bool(config.providers.zhipu.api_key)

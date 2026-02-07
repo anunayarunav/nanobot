@@ -66,6 +66,10 @@ class ProviderConfig(BaseModel):
     api_key: str = ""
     api_base: str | None = None
     extra_headers: dict[str, str] | None = None  # Custom headers (e.g. APP-Code for AiHubMix)
+    # OAuth fields (for Anthropic Claude Pro/Max subscription tokens)
+    oauth_access_token: str = ""
+    oauth_refresh_token: str = ""
+    oauth_expires_at: int = 0
 
 
 class ProvidersConfig(BaseModel):
@@ -142,12 +146,12 @@ class Config(BaseSettings):
             "groq": p.groq, "moonshot": p.moonshot, "kimi": p.moonshot, "vllm": p.vllm,
         }
         for kw, provider in keyword_map.items():
-            if kw in model and provider.api_key:
+            if kw in model and (provider.api_key or provider.oauth_access_token):
                 return provider
         # Fallback: gateways first (can serve any model), then specific providers
         all_providers = [p.openrouter, p.aihubmix, p.anthropic, p.openai, p.deepseek,
                          p.gemini, p.zhipu, p.dashscope, p.moonshot, p.vllm, p.groq]
-        return next((pr for pr in all_providers if pr.api_key), None)
+        return next((pr for pr in all_providers if pr.api_key or pr.oauth_access_token), None)
 
     def get_api_key(self, model: str | None = None) -> str | None:
         """Get API key for the given model. Falls back to first available key."""
