@@ -248,6 +248,51 @@ Use write_file to update:
 
 No restart needed for workspace file changes (loaded fresh each message).
 
+### Install a Skill on a Worker
+
+Copy a skill from the master's workspace to a worker project. Skills are re-discovered each message, so no restart is needed.
+
+1. **Verify** the skill exists on master:
+   ```bash
+   ls /home/deploy/bots/master/.nanobot/workspace/skills/{skill_name}/SKILL.md
+   ```
+
+2. **Verify** the target project exists:
+   ```bash
+   [ -d "/home/deploy/bots/{project}" ] && echo "OK" || echo "NOT FOUND"
+   ```
+
+3. **Copy** the skill:
+   ```bash
+   cp -r /home/deploy/bots/master/.nanobot/workspace/skills/{skill_name} \
+         /home/deploy/bots/{project}/.nanobot/workspace/skills/{skill_name}
+   ```
+
+4. **Log**:
+   ```bash
+   echo "$(date -Iseconds) INSTALL_SKILL project={project} skill={skill_name}" >> /home/deploy/bots/audit.log
+   ```
+
+5. **Confirm**: Tell the user the skill is now available on the worker (no restart needed).
+
+### Remove a Skill from a Worker
+
+```bash
+rm -r /home/deploy/bots/{project}/.nanobot/workspace/skills/{skill_name}
+echo "$(date -Iseconds) REMOVE_SKILL project={project} skill={skill_name}" >> /home/deploy/bots/audit.log
+```
+
+### List Skills on a Project
+
+```bash
+ls /home/deploy/bots/{project}/.nanobot/workspace/skills/ 2>/dev/null || echo "No skills"
+```
+
+To list all available skills (on master):
+```bash
+ls /home/deploy/bots/master/.nanobot/workspace/skills/
+```
+
 ## Response Style
 
 When reporting status, use concise tables or bullet lists. Example:
