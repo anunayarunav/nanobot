@@ -213,8 +213,8 @@ class AgentLoop:
             max_iterations=self.max_iterations,
         )
 
-        if final_content is None:
-            final_content = "I've completed processing but have no response to give."
+        if not final_content:
+            final_content = "I processed your request but wasn't able to generate a text response. Could you try rephrasing or asking again?"
 
         # HOOK: transform_response
         final_content = await self.extensions.transform_response(final_content, ctx)
@@ -290,7 +290,7 @@ class AgentLoop:
             max_iterations=self.max_iterations,
         )
 
-        if final_content is None:
+        if not final_content:
             final_content = "Background task completed."
 
         # HOOK: transform_response

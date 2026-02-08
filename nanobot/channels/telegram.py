@@ -2,15 +2,22 @@
 
 import asyncio
 import re
+from pathlib import Path
 
 from loguru import logger
-from telegram import Update
+from telegram import InputMediaPhoto, InputMediaVideo, Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import TelegramConfig
+
+# File extensions grouped by Telegram send method
+_PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+_AUDIO_EXTS = {".mp3", ".ogg", ".m4a", ".wav", ".flac"}
+_GROUPABLE_EXTS = _PHOTO_EXTS | _VIDEO_EXTS  # can go into a media group
 
 
 def _markdown_to_telegram_html(text: str) -> str:
@@ -152,31 +159,108 @@ class TelegramChannel(BaseChannel):
             self._app = None
     
     async def send(self, msg: OutboundMessage) -> None:
-        """Send a message through Telegram."""
+        """Send a message through Telegram, including media if provided.
+
+        Multiple photos/videos are batched into a media group (album).
+        Audio and documents are sent individually.
+        """
         if not self._app:
             logger.warning("Telegram bot not running")
             return
-        
+
         try:
-            # chat_id should be the Telegram chat ID (integer)
             chat_id = int(msg.chat_id)
-            # Convert markdown to Telegram HTML
-            html_content = _markdown_to_telegram_html(msg.content)
-            await self._app.bot.send_message(
-                chat_id=chat_id,
-                text=html_content,
-                parse_mode="HTML"
-            )
         except ValueError:
             logger.error(f"Invalid chat_id: {msg.chat_id}")
+            return
+
+        # --- media ---
+        if msg.media:
+            groupable: list[Path] = []   # photos + videos → album
+            others: list[Path] = []      # audio, docs → sent individually
+
+            for p_str in msg.media:
+                p = Path(p_str)
+                if not p.exists():
+                    logger.warning(f"Media file not found: {p}")
+                    continue
+                if p.suffix.lower() in _GROUPABLE_EXTS:
+                    groupable.append(p)
+                else:
+                    others.append(p)
+
+            # Send groupable items as album(s) (max 10 per group)
+            for i in range(0, len(groupable), 10):
+                batch = groupable[i : i + 10]
+                if len(batch) == 1:
+                    await self._send_single_media(chat_id, batch[0])
+                else:
+                    await self._send_media_group(chat_id, batch)
+
+            # Send non-groupable items individually
+            for p in others:
+                await self._send_single_media(chat_id, p)
+
+        # --- text ---
+        if msg.content:
+            await self._send_text(chat_id, msg.content)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    async def _send_media_group(self, chat_id: int, files: list[Path]) -> None:
+        """Send multiple photos/videos as a Telegram album."""
+        media_items = []
+        for p in files:
+            suffix = p.suffix.lower()
+            if suffix in _VIDEO_EXTS:
+                media_items.append(InputMediaVideo(media=open(p, "rb"), supports_streaming=True))
+            else:
+                media_items.append(InputMediaPhoto(media=open(p, "rb")))
+        try:
+            await self._app.bot.send_media_group(chat_id=chat_id, media=media_items)
+            logger.debug(f"Sent media group ({len(files)} items) to {chat_id}")
         except Exception as e:
-            # Fallback to plain text if HTML parsing fails
+            logger.error(f"Failed to send media group: {e}")
+            # Fallback: send individually
+            for p in files:
+                await self._send_single_media(chat_id, p)
+        finally:
+            for item in media_items:
+                if hasattr(item.media, "close"):
+                    item.media.close()
+
+    async def _send_single_media(self, chat_id: int, file_path: Path) -> None:
+        """Send a single media file using the appropriate Telegram method."""
+        suffix = file_path.suffix.lower()
+        try:
+            with open(file_path, "rb") as f:
+                if suffix in _PHOTO_EXTS:
+                    await self._app.bot.send_photo(chat_id=chat_id, photo=f)
+                elif suffix in _VIDEO_EXTS:
+                    await self._app.bot.send_video(
+                        chat_id=chat_id, video=f, supports_streaming=True,
+                    )
+                elif suffix in _AUDIO_EXTS:
+                    await self._app.bot.send_audio(chat_id=chat_id, audio=f)
+                else:
+                    await self._app.bot.send_document(chat_id=chat_id, document=f)
+            logger.debug(f"Sent media: {file_path}")
+        except Exception as e:
+            logger.error(f"Failed to send media {file_path}: {e}")
+
+    async def _send_text(self, chat_id: int, content: str) -> None:
+        """Send text with HTML formatting, falling back to plain text."""
+        try:
+            html_content = _markdown_to_telegram_html(content)
+            await self._app.bot.send_message(
+                chat_id=chat_id, text=html_content, parse_mode="HTML",
+            )
+        except Exception as e:
             logger.warning(f"HTML parse failed, falling back to plain text: {e}")
             try:
-                await self._app.bot.send_message(
-                    chat_id=int(msg.chat_id),
-                    text=msg.content
-                )
+                await self._app.bot.send_message(chat_id=chat_id, text=content)
             except Exception as e2:
                 logger.error(f"Error sending Telegram message: {e2}")
     

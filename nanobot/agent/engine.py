@@ -31,6 +31,7 @@ async def run_tool_loop(
         The final text content, or None if max_iterations hit without a text response.
     """
     prefix = f"{log_prefix} " if log_prefix else ""
+    empty_retries = 0
 
     for _ in range(max_iterations):
         response = await provider.chat(
@@ -40,6 +41,16 @@ async def run_tool_loop(
         )
 
         if not response.has_tool_calls:
+            # Some models return empty content with no tool calls — nudge once
+            if not response.content and empty_retries < 1:
+                empty_retries += 1
+                logger.warning(f"{prefix}Empty response with no tool calls, retrying")
+                messages.append({"role": "assistant", "content": ""})
+                messages.append({
+                    "role": "user",
+                    "content": "[System: Your previous response was empty. Please provide a summary of what you did or respond to the user's message.]",
+                })
+                continue
             return response.content
 
         # Append assistant message with tool calls
