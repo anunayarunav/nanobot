@@ -43,8 +43,9 @@ async def run_tool_loop(
             return response.content
 
         # Append assistant message with tool calls
-        tool_call_dicts = [
-            {
+        tool_call_dicts = []
+        for tc in response.tool_calls:
+            tc_dict: dict[str, Any] = {
                 "id": tc.id,
                 "type": "function",
                 "function": {
@@ -52,8 +53,10 @@ async def run_tool_loop(
                     "arguments": json.dumps(tc.arguments),
                 },
             }
-            for tc in response.tool_calls
-        ]
+            # Preserve provider-specific fields (e.g. Gemini thought signatures)
+            if tc.provider_specific_fields:
+                tc_dict["provider_specific_fields"] = tc.provider_specific_fields
+            tool_call_dicts.append(tc_dict)
         messages.append({
             "role": "assistant",
             "content": response.content or "",

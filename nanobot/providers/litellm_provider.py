@@ -171,10 +171,16 @@ class LiteLLMProvider(LLMProvider):
                     except json.JSONDecodeError:
                         args = {"raw": args}
                 
+                # Preserve provider-specific fields (e.g. Gemini thought_signature)
+                psf = {}
+                if hasattr(tc, "provider_specific_fields") and tc.provider_specific_fields:
+                    psf = dict(tc.provider_specific_fields)
+
                 tool_calls.append(ToolCallRequest(
                     id=tc.id,
                     name=tc.function.name,
                     arguments=args,
+                    provider_specific_fields=psf,
                 ))
         
         usage = {}
