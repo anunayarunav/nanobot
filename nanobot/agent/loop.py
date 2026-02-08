@@ -19,6 +19,8 @@ from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.subagent import SubagentManager
+from nanobot.extensions.base import ExtensionContext
+from nanobot.extensions.manager import ExtensionManager
 from nanobot.session.manager import SessionManager
 
 
@@ -46,6 +48,7 @@ class AgentLoop:
         cron_service: "CronService | None" = None,
         restrict_to_workspace: bool = False,
         config: "Config | None" = None,
+        extensions: "ExtensionManager | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig, Config
         from nanobot.cron.service import CronService
@@ -74,6 +77,7 @@ class AgentLoop:
         )
         
         self.commands = CommandHandler(config) if config else None
+        self.extensions = extensions or ExtensionManager()
 
         self._running = False
         self._register_default_tools()
@@ -174,22 +178,32 @@ class AgentLoop:
 
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
-        
+
         # Get or create session
         session = self.sessions.get_or_create(msg.session_key)
-        
+
         # Update tool contexts
         self.tools.set_context(msg.channel, msg.chat_id)
 
-        # Build initial messages (use get_history for LLM-formatted messages)
+        ctx = ExtensionContext(
+            channel=msg.channel, chat_id=msg.chat_id,
+            session_key=msg.session_key, workspace=str(self.workspace),
+        )
+
+        # HOOK: transform_history
+        history = session.get_history()
+        history = await self.extensions.transform_history(history, session, ctx)
+
+        # HOOK: transform_messages
         messages = self.context.build_messages(
-            history=session.get_history(),
+            history=history,
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel,
             chat_id=msg.chat_id,
         )
-        
+        messages = await self.extensions.transform_messages(messages, ctx)
+
         # Agent loop
         final_content = await run_tool_loop(
             provider=self.provider,
@@ -201,14 +215,20 @@ class AgentLoop:
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
-        
+
+        # HOOK: transform_response
+        final_content = await self.extensions.transform_response(final_content, ctx)
+
         # Log response preview
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
-        
+
         # Save to session
         session.add_message("user", msg.content)
         session.add_message("assistant", final_content)
+
+        # HOOK: pre_session_save
+        await self.extensions.pre_session_save(session, ctx)
         self.sessions.save(session)
         
         return OutboundMessage(
@@ -239,18 +259,28 @@ class AgentLoop:
         # Use the origin session for context
         session_key = f"{origin_channel}:{origin_chat_id}"
         session = self.sessions.get_or_create(session_key)
-        
+
         # Update tool contexts
         self.tools.set_context(origin_channel, origin_chat_id)
 
-        # Build messages with the announce content
+        ctx = ExtensionContext(
+            channel=origin_channel, chat_id=origin_chat_id,
+            session_key=session_key, workspace=str(self.workspace),
+        )
+
+        # HOOK: transform_history
+        history = session.get_history()
+        history = await self.extensions.transform_history(history, session, ctx)
+
+        # HOOK: transform_messages
         messages = self.context.build_messages(
-            history=session.get_history(),
+            history=history,
             current_message=msg.content,
             channel=origin_channel,
             chat_id=origin_chat_id,
         )
-        
+        messages = await self.extensions.transform_messages(messages, ctx)
+
         # Agent loop (limited for announce handling)
         final_content = await run_tool_loop(
             provider=self.provider,
@@ -262,10 +292,16 @@ class AgentLoop:
 
         if final_content is None:
             final_content = "Background task completed."
-        
+
+        # HOOK: transform_response
+        final_content = await self.extensions.transform_response(final_content, ctx)
+
         # Save to session (mark as system message in history)
         session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
         session.add_message("assistant", final_content)
+
+        # HOOK: pre_session_save
+        await self.extensions.pre_session_save(session, ctx)
         self.sessions.save(session)
         
         return OutboundMessage(

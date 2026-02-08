@@ -1,6 +1,8 @@
 """Configuration schema using Pydantic."""
 
 from pathlib import Path
+from typing import Any
+
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 
@@ -122,6 +124,13 @@ class ToolsConfig(BaseModel):
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
 
 
+class ExtensionConfig(BaseModel):
+    """Configuration for a single extension."""
+    class_path: str  # e.g. "nanobot.extensions.compaction.CompactionExtension"
+    enabled: bool = True
+    options: dict[str, Any] = Field(default_factory=dict)
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
@@ -129,6 +138,7 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    extensions: list[ExtensionConfig] = Field(default_factory=list)
     
     @property
     def workspace_path(self) -> Path:

@@ -40,6 +40,7 @@ Telegram/Discord/...       MessageBus         AgentLoop
 |---------|---------|-----------|
 | `agent/` | Core agent loop, context building, memory, skills | `loop.py`, `engine.py`, `commands.py`, `context.py`, `memory.py`, `skills.py`, `subagent.py` |
 | `agent/tools/` | Tool base class, registry, built-in tools | `base.py`, `registry.py`, `filesystem.py`, `shell.py`, `web.py`, `message.py`, `spawn.py`, `cron.py` |
+| `extensions/` | Extension system: lifecycle hooks + built-in extensions | `base.py`, `manager.py`, `compaction.py` |
 | `bus/` | Async message bus decoupling channels from agent | `queue.py`, `events.py` |
 | `channels/` | Chat platform adapters | `base.py`, `manager.py`, `telegram.py`, `discord.py`, `whatsapp.py`, `feishu.py` |
 | `config/` | Pydantic config schema + JSON loader | `schema.py`, `loader.py` |
@@ -133,6 +134,53 @@ The `--dangerously-skip-permissions` flag is required for headless operation. Th
 - **Deny patterns** — Blocks `rm -rf`, `dd`, `shutdown`, fork bombs, etc.
 - **Workspace restriction** — When `restrictToWorkspace: true`, all file paths in commands must be within the workspace directory
 - **Git clone whitelist** — `tools.exec.allowedGitRepos` config lists allowed repo URL patterns (e.g., `github.com/user/*`). URLs are normalized before matching.
+
+## Extension System
+
+Extensions are lifecycle hooks that plug into the agent message pipeline without modifying the core loop. They are loaded from config and run in pipeline order.
+
+### Extension Base Class (`extensions/base.py`)
+
+`Extension` provides four async hook methods (all no-ops by default — override what you need):
+
+| Hook | Signature | When |
+|------|-----------|------|
+| `transform_history` | `(history, session, ctx) -> history` | After `session.get_history()`, before `build_messages()`. Modify conversation history. |
+| `transform_messages` | `(messages, ctx) -> messages` | After `build_messages()`, before LLM call. Modify full message array. |
+| `transform_response` | `(content, ctx) -> content` | After tool loop, before session save. Modify the response. |
+| `pre_session_save` | `(session, ctx) -> None` | Before `sessions.save()`. Mutate session in place (e.g., trim, update metadata). |
+
+`ExtensionContext` carries `channel`, `chat_id`, `session_key`, and `workspace` to all hooks.
+
+### Extension Manager (`extensions/manager.py`)
+
+`ExtensionManager` loads extensions from config (dynamic import via `class_path`), calls `on_load(options)` on each, and runs hooks in pipeline order (each extension's output is the next one's input).
+
+### Built-in Extensions
+
+- **CompactionExtension** (`extensions/compaction.py`) — Archives old session messages to JSONL files, injects a summary of archived context into future conversations. Configurable `max_active_messages` threshold.
+
+### Config
+
+```json
+{
+  "extensions": [
+    {
+      "classPath": "nanobot.extensions.compaction.CompactionExtension",
+      "enabled": true,
+      "options": { "maxActiveMessages": 30, "archiveDir": "sessions/archives" }
+    }
+  ]
+}
+```
+
+### Adding an Extension
+
+1. Create a class inheriting `Extension` from `extensions/base.py`
+2. Set `name` class attribute
+3. Override `on_load(config)` to read options
+4. Override the hooks you need
+5. Add to config `extensions` list with `classPath`, `enabled`, `options`
 
 ## Skills System
 

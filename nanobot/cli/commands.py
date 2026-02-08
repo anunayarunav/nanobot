@@ -198,7 +198,11 @@ def gateway(
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
     
-    # Create agent with cron service
+    # Create extension manager (loaded async in run())
+    from nanobot.extensions.manager import ExtensionManager
+    ext_mgr = ExtensionManager()
+
+    # Create agent with cron service + extensions
     agent = AgentLoop(
         bus=bus,
         provider=provider,
@@ -210,6 +214,7 @@ def gateway(
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         config=config,
+        extensions=ext_mgr,
     )
     
     # Set cron callback (needs agent)
@@ -259,6 +264,7 @@ def gateway(
     
     async def run():
         try:
+            await ext_mgr.load_from_config(config.extensions)
             await cron.start()
             await heartbeat.start()
             await asyncio.gather(

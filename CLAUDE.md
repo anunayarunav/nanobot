@@ -6,7 +6,7 @@ Actionable reference for AI assistants working on this codebase.
 
 - **What:** Lightweight AI assistant framework (~6k lines Python) connecting LLMs to chat platforms with tools, memory, and skills
 - **Entry point:** `nanobot gateway` → `cli/commands.py:gateway()` → `AgentLoop.run()`
-- **Core loop:** `agent/loop.py:_process_message()` — context build → LLM call → tool execution loop → response
+- **Core loop:** `agent/loop.py:_process_message()` — context build → extension hooks → LLM call → tool execution loop → extension hooks → response
 
 ## Conventions
 
@@ -37,6 +37,13 @@ Actionable reference for AI assistants working on this codebase.
 3. Add config model to `config/schema.py`
 4. Register in `channels/manager.py`
 
+### Adding an Extension
+1. Subclass `Extension` from `extensions/base.py`, set `name`
+2. Override `on_load(config)` to read options from the config dict
+3. Override hooks: `transform_history`, `transform_messages`, `transform_response`, `pre_session_save`
+4. Add to config `extensions` list: `{"classPath": "your.module.Class", "enabled": true, "options": {...}}`
+5. See `extensions/compaction.py` for a complete example
+
 ### ContextAwareTool
 Tools that need per-message channel/chat_id (MessageTool, SpawnTool, CronTool) inherit `ContextAwareTool` and implement `set_context(channel, chat_id)`. The registry calls `set_context()` on all such tools before each message.
 
@@ -52,6 +59,9 @@ Tools that need per-message channel/chat_id (MessageTool, SpawnTool, CronTool) i
 | `agent/tools/registry.py` | Tool registry with `set_context()` broadcast |
 | `agent/tools/shell.py` | ExecTool with deny patterns, workspace restriction, git clone whitelist |
 | `agent/subagent.py` | Background task execution with isolated tool registry |
+| `extensions/base.py` | `Extension` base class, `ExtensionContext` dataclass |
+| `extensions/manager.py` | `ExtensionManager` — loads and runs extensions through hooks |
+| `extensions/compaction.py` | Session compaction extension (archives old messages) |
 | `providers/base.py` | `LLMProvider` ABC, `LLMResponse`, `ToolCallRequest` |
 | `providers/factory.py` | `make_provider()` — unified provider creation |
 | `providers/litellm_provider.py` | LiteLLM wrapper for OpenRouter, Gemini, Anthropic API, etc. |
