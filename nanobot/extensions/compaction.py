@@ -9,23 +9,49 @@ from loguru import logger
 from nanobot.extensions.base import Extension, ExtensionContext
 from nanobot.utils.helpers import ensure_dir, safe_filename
 
+# Rough approximation: 1 token ≈ 4 characters for English text.
+# Not exact, but good enough for compaction thresholds across providers.
+CHARS_PER_TOKEN = 4
+
+
+def estimate_tokens(text: str) -> int:
+    """Estimate token count from text using char/4 heuristic."""
+    return len(text) // CHARS_PER_TOKEN
+
+
+def estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
+    """Estimate total tokens across a list of messages."""
+    total = 0
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total += estimate_tokens(content)
+        elif isinstance(content, list):
+            # Multimodal content (images + text blocks)
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    total += estimate_tokens(block.get("text", ""))
+        # Small overhead per message for role, metadata
+        total += 4
+    return total
+
 
 class CompactionExtension(Extension):
-    """Archives old session messages and prepends a summary to history.
+    """Archives old session messages when token count exceeds threshold.
 
     Config options:
-        max_active_messages: int = 30  — messages kept in active session
+        max_tokens: int = 170000  — compact when history exceeds this token count
         archive_dir: str = "sessions/archives" — relative to workspace
     """
 
     name = "compaction"
 
     def __init__(self) -> None:
-        self.max_active_messages: int = 30
+        self.max_tokens: int = 170_000
         self.archive_dir: str = "sessions/archives"
 
     async def on_load(self, config: dict[str, Any]) -> None:
-        self.max_active_messages = config.get("max_active_messages", 30)
+        self.max_tokens = config.get("max_tokens", 170_000)
         self.archive_dir = config.get("archive_dir", "sessions/archives")
 
     async def transform_history(
@@ -43,14 +69,39 @@ class CompactionExtension(Extension):
         return [summary_msg] + history
 
     async def pre_session_save(self, session: Any, ctx: ExtensionContext) -> None:
-        """Archive old messages when session exceeds threshold."""
-        threshold = int(self.max_active_messages * 1.5)
-        if len(session.messages) <= threshold:
+        """Archive old messages when session token count exceeds threshold."""
+        total_tokens = estimate_messages_tokens(session.messages)
+        if total_tokens <= self.max_tokens:
             return
 
-        to_keep = self.max_active_messages
-        to_archive = session.messages[:-to_keep]
-        kept = session.messages[-to_keep:]
+        # Find the split point: walk from the end, keeping messages until
+        # we've accumulated max_tokens * 0.6 (keep 60%, archive the rest).
+        # This leaves headroom so we don't re-compact on the very next message.
+        keep_budget = int(self.max_tokens * 0.6)
+        kept_tokens = 0
+        split_idx = len(session.messages)
+
+        for i in range(len(session.messages) - 1, -1, -1):
+            msg = session.messages[i]
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                msg_tokens = estimate_tokens(content) + 4
+            else:
+                msg_tokens = 4
+            if kept_tokens + msg_tokens > keep_budget:
+                split_idx = i + 1
+                break
+            kept_tokens += msg_tokens
+        else:
+            # All messages fit in budget — shouldn't happen since total > max,
+            # but guard against it
+            split_idx = 0
+
+        if split_idx == 0:
+            return  # Nothing to archive
+
+        to_archive = session.messages[:split_idx]
+        kept = session.messages[split_idx:]
 
         # Append to archive file
         archive_path = self._get_archive_path(ctx.workspace, session.key)
@@ -62,6 +113,7 @@ class CompactionExtension(Extension):
 
         archived_count = len(to_archive)
         prev_archived = session.metadata.get("archived_count", 0)
+        archived_tokens = estimate_messages_tokens(to_archive)
 
         # Build summary from archived messages
         summary = self._build_summary(to_archive, session.metadata.get("compaction_summary"))
@@ -73,8 +125,8 @@ class CompactionExtension(Extension):
         session.metadata["archived_count"] = prev_archived + archived_count
 
         logger.info(
-            f"Compacted session {session.key}: archived {archived_count} messages, "
-            f"kept {len(kept)}, total archived: {prev_archived + archived_count}"
+            f"Compacted session {session.key}: archived {archived_count} messages "
+            f"(~{archived_tokens} tokens), kept {len(kept)} (~{kept_tokens} tokens)"
         )
 
     def _get_archive_path(self, workspace: str, session_key: str) -> Path:
@@ -92,12 +144,10 @@ class CompactionExtension(Extension):
 
         # Carry forward previous summary context (abbreviated)
         if prev_summary:
-            # Keep first 300 chars of previous summary
             parts.append(prev_summary[:300].rstrip())
 
-        # Extract user messages as topic markers (take every few to avoid repetition)
+        # Extract user messages as topic markers (sample up to 5)
         user_msgs = [m for m in messages if m.get("role") == "user"]
-        # Sample up to 5 user messages spread across the archived range
         step = max(1, len(user_msgs) // 5)
         sampled = user_msgs[::step][:5]
 
@@ -130,5 +180,4 @@ class CompactionExtension(Extension):
             parts.append(f"Last archived exchange:\nUser: {u}\nAssistant: {a}")
 
         summary = "\n\n".join(parts)
-        # Cap total summary size
         return summary[:1000]
