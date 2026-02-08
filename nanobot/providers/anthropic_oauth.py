@@ -7,12 +7,13 @@ The OAuth token is passed via CLAUDE_CODE_OAUTH_TOKEN env var.
 
 import asyncio
 import json
+import os
 import shutil
 from typing import Any
 
 from loguru import logger
 
-from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from nanobot.providers.base import LLMProvider, LLMResponse
 
 
 class AnthropicOAuthProvider(LLMProvider):
@@ -28,7 +29,7 @@ class AnthropicOAuthProvider(LLMProvider):
         default_model: str = "anthropic/claude-opus-4-6",
         claude_bin: str | None = None,
     ):
-        super().__init__(api_key="oauth")
+        super().__init__()
         self.oauth_token = oauth_token
         self.default_model = default_model
         self.claude_bin = claude_bin or shutil.which("claude") or "claude"
@@ -57,7 +58,6 @@ class AnthropicOAuthProvider(LLMProvider):
             "--dangerously-skip-permissions",
         ]
 
-        import os
         env = {**os.environ, "CLAUDE_CODE_OAUTH_TOKEN": self.oauth_token, "CLAUDE_CODE_ENTRYPOINT": "cli"}
 
         try:
@@ -99,7 +99,8 @@ class AnthropicOAuthProvider(LLMProvider):
         """Build a single prompt string from OpenAI-format messages.
 
         Claude CLI's -p mode takes a single string prompt.
-        We combine system + conversation into one prompt.
+        We combine system + conversation into one prompt, preserving
+        tool call structure for multi-turn context.
         """
         parts = []
         for msg in messages:
@@ -110,10 +111,23 @@ class AnthropicOAuthProvider(LLMProvider):
             elif role == "user":
                 parts.append(content)
             elif role == "assistant":
-                parts.append(f"[Previous assistant response: {content}]")
+                # Preserve tool call info if present
+                tool_calls = msg.get("tool_calls", [])
+                if tool_calls:
+                    calls = ", ".join(
+                        tc.get("function", {}).get("name", "?") for tc in tool_calls
+                    )
+                    text = f"[Assistant called tools: {calls}]"
+                    if content:
+                        text = f"{content}\n{text}"
+                    parts.append(text)
+                elif content:
+                    parts.append(f"[Previous assistant response: {content}]")
             elif role == "tool":
                 name = msg.get("name", "tool")
-                parts.append(f"[Tool result from {name}: {content}]")
+                # Truncate very long tool results to keep prompt manageable
+                result = content[:2000] if len(content) > 2000 else content
+                parts.append(f"[Tool result from {name}:\n{result}]")
         return "\n\n".join(parts)
 
     @staticmethod

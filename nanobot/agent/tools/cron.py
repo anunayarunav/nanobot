@@ -2,12 +2,12 @@
 
 from typing import Any
 
-from nanobot.agent.tools.base import Tool
+from nanobot.agent.tools.base import ContextAwareTool
 from nanobot.cron.service import CronService
 from nanobot.cron.types import CronSchedule
 
 
-class CronTool(Tool):
+class CronTool(ContextAwareTool):
     """Tool to schedule reminders and recurring tasks."""
     
     def __init__(self, cron_service: CronService):

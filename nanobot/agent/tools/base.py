@@ -7,7 +7,7 @@ from typing import Any
 class Tool(ABC):
     """
     Abstract base class for agent tools.
-    
+
     Tools are capabilities that the agent can use to interact with
     the environment, such as reading files, executing commands, etc.
     """
@@ -100,3 +100,18 @@ class Tool(ABC):
                 "parameters": self.parameters,
             }
         }
+
+
+class ContextAwareTool(Tool):
+    """Tool that needs per-message context (channel, chat_id).
+
+    Subclass this instead of Tool for tools that need to know the current
+    channel and chat ID (e.g. MessageTool, SpawnTool, CronTool).
+    The registry automatically calls set_context() on all instances before
+    each message is processed.
+    """
+
+    @abstractmethod
+    def set_context(self, channel: str, chat_id: str) -> None:
+        """Update the tool's channel/chat context for the current message."""
+        pass

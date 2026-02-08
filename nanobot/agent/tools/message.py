@@ -2,11 +2,11 @@
 
 from typing import Any, Callable, Awaitable
 
-from nanobot.agent.tools.base import Tool
+from nanobot.agent.tools.base import ContextAwareTool
 from nanobot.bus.events import OutboundMessage
 
 
-class MessageTool(Tool):
+class MessageTool(ContextAwareTool):
     """Tool to send messages to users on chat channels."""
     
     def __init__(

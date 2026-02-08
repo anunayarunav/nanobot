@@ -56,9 +56,16 @@ class AgentDefaults(BaseModel):
     max_tool_iterations: int = 20
 
 
+class ModelAlias(BaseModel):
+    """A model alias for /model command quick switching."""
+    model: str  # Full model ID, e.g. "anthropic/claude-sonnet-4-5-20250929"
+    mode: str = "api"  # "api" or "oauth"
+
+
 class AgentsConfig(BaseModel):
     """Agent configuration."""
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
+    model_aliases: dict[str, ModelAlias] = Field(default_factory=dict)
 
 
 class ProviderConfig(BaseModel):

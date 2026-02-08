@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from nanobot.agent.tools.base import Tool
+from nanobot.agent.tools.base import ContextAwareTool, Tool
 
 
 class ToolRegistry:
@@ -35,6 +35,12 @@ class ToolRegistry:
         """Get all tool definitions in OpenAI format."""
         return [tool.to_schema() for tool in self._tools.values()]
     
+    def set_context(self, channel: str, chat_id: str) -> None:
+        """Broadcast channel/chat context to all ContextAwareTool instances."""
+        for tool in self._tools.values():
+            if isinstance(tool, ContextAwareTool):
+                tool.set_context(channel, chat_id)
+
     async def execute(self, name: str, params: dict[str, Any]) -> str:
         """
         Execute a tool by name with given parameters.

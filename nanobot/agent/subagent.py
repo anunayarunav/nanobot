@@ -1,7 +1,6 @@
 """Subagent manager for background task execution."""
 
 import asyncio
-import json
 import uuid
 from pathlib import Path
 from typing import Any
@@ -11,6 +10,7 @@ from loguru import logger
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
+from nanobot.agent.engine import run_tool_loop
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, ListDirTool
 from nanobot.agent.tools.shell import ExecTool
@@ -118,53 +118,15 @@ class SubagentManager:
             ]
             
             # Run agent loop (limited iterations)
-            max_iterations = 15
-            iteration = 0
-            final_result: str | None = None
-            
-            while iteration < max_iterations:
-                iteration += 1
-                
-                response = await self.provider.chat(
-                    messages=messages,
-                    tools=tools.get_definitions(),
-                    model=self.model,
-                )
-                
-                if response.has_tool_calls:
-                    # Add assistant message with tool calls
-                    tool_call_dicts = [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.name,
-                                "arguments": json.dumps(tc.arguments),
-                            },
-                        }
-                        for tc in response.tool_calls
-                    ]
-                    messages.append({
-                        "role": "assistant",
-                        "content": response.content or "",
-                        "tool_calls": tool_call_dicts,
-                    })
-                    
-                    # Execute tools
-                    for tool_call in response.tool_calls:
-                        args_str = json.dumps(tool_call.arguments)
-                        logger.debug(f"Subagent [{task_id}] executing: {tool_call.name} with arguments: {args_str}")
-                        result = await tools.execute(tool_call.name, tool_call.arguments)
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "name": tool_call.name,
-                            "content": result,
-                        })
-                else:
-                    final_result = response.content
-                    break
-            
+            final_result = await run_tool_loop(
+                provider=self.provider,
+                tools=tools,
+                messages=messages,
+                model=self.model,
+                max_iterations=15,
+                log_prefix=f"Subagent [{task_id}]",
+            )
+
             if final_result is None:
                 final_result = "Task completed but no final response was generated."
             

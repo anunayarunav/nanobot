@@ -1,16 +1,16 @@
 """Agent loop: the core processing engine."""
 
 import asyncio
-import json
 from pathlib import Path
-from typing import Any
 
 from loguru import logger
 
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
+from nanobot.agent.commands import CommandHandler
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.engine import run_tool_loop
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
 from nanobot.agent.tools.shell import ExecTool
@@ -73,6 +73,8 @@ class AgentLoop:
             restrict_to_workspace=restrict_to_workspace,
         )
         
+        self.commands = CommandHandler(config) if config else None
+
         self._running = False
         self._register_default_tools()
     
@@ -159,9 +161,16 @@ class AgentLoop:
             return await self._process_system_message(msg)
 
         # Handle /model command
-        if msg.content.strip().startswith("/model"):
-            result = self._handle_model_command(msg.content.strip())
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=result)
+        if msg.content.strip().startswith("/model") and self.commands:
+            status_msg, new_model, new_provider = self.commands.handle_model(
+                msg.content.strip(), self.model
+            )
+            if new_provider and new_model:
+                self.provider = new_provider
+                self.model = new_model
+                self.subagents.provider = new_provider
+                self.subagents.model = new_model
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=status_msg)
 
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
@@ -170,18 +179,8 @@ class AgentLoop:
         session = self.sessions.get_or_create(msg.session_key)
         
         # Update tool contexts
-        message_tool = self.tools.get("message")
-        if isinstance(message_tool, MessageTool):
-            message_tool.set_context(msg.channel, msg.chat_id)
-        
-        spawn_tool = self.tools.get("spawn")
-        if isinstance(spawn_tool, SpawnTool):
-            spawn_tool.set_context(msg.channel, msg.chat_id)
-        
-        cron_tool = self.tools.get("cron")
-        if isinstance(cron_tool, CronTool):
-            cron_tool.set_context(msg.channel, msg.chat_id)
-        
+        self.tools.set_context(msg.channel, msg.chat_id)
+
         # Build initial messages (use get_history for LLM-formatted messages)
         messages = self.context.build_messages(
             history=session.get_history(),
@@ -192,50 +191,14 @@ class AgentLoop:
         )
         
         # Agent loop
-        iteration = 0
-        final_content = None
-        
-        while iteration < self.max_iterations:
-            iteration += 1
-            
-            # Call LLM
-            response = await self.provider.chat(
-                messages=messages,
-                tools=self.tools.get_definitions(),
-                model=self.model
-            )
-            
-            # Handle tool calls
-            if response.has_tool_calls:
-                # Add assistant message with tool calls
-                tool_call_dicts = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments)  # Must be JSON string
-                        }
-                    }
-                    for tc in response.tool_calls
-                ]
-                messages = self.context.add_assistant_message(
-                    messages, response.content, tool_call_dicts
-                )
-                
-                # Execute tools
-                for tool_call in response.tool_calls:
-                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                    logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
-                    messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result
-                    )
-            else:
-                # No tool calls, we're done
-                final_content = response.content
-                break
-        
+        final_content = await run_tool_loop(
+            provider=self.provider,
+            tools=self.tools,
+            messages=messages,
+            model=self.model,
+            max_iterations=self.max_iterations,
+        )
+
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
         
@@ -254,110 +217,6 @@ class AgentLoop:
             content=final_content
         )
     
-    def _handle_model_command(self, text: str) -> str:
-        """Handle /model command. Returns a status message."""
-        parts = text.split(None, 1)
-        if len(parts) == 1:
-            # Just "/model" — show current and available
-            return self._model_status()
-
-        target = parts[1].strip()
-        if not self.config:
-            return f"Current model: `{self.model}`\n\nModel switching unavailable (no config loaded)."
-
-        # Aliases for quick switching
-        aliases = {
-            "cc": ("anthropic/claude-sonnet-4-5-20250929", "oauth"),
-            "claude-code": ("anthropic/claude-sonnet-4-5-20250929", "oauth"),
-            "opus": ("anthropic/claude-opus-4-6", "oauth"),
-            "sonnet": ("anthropic/claude-sonnet-4-5-20250929", "oauth"),
-            "gemini": ("gemini/gemini-2.5-pro-preview-06-05", "api"),
-            "flash": ("gemini/gemini-2.5-flash-preview-05-20", "api"),
-            "claude": ("anthropic/claude-sonnet-4-5-20250929", "api"),
-        }
-
-        if target.lower() in aliases:
-            model, mode = aliases[target.lower()]
-        else:
-            # Explicit model name — detect mode from model name
-            model = target
-            import os
-            has_oauth = self.config.providers.anthropic.oauth_access_token or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
-            mode = "oauth" if has_oauth and "anthropic" in model.lower() else "api"
-
-        try:
-            provider = self._make_provider_for_model(model, mode)
-            self.provider = provider
-            self.model = model
-            # Update subagents too
-            self.subagents.provider = provider
-            self.subagents.model = model
-            logger.info(f"Switched to model: {model} (mode: {mode})")
-            label = "Claude Code (OAuth)" if mode == "oauth" else "API key"
-            return f"Switched to `{model}` via {label}"
-        except Exception as e:
-            logger.error(f"Failed to switch model: {e}")
-            return f"Failed to switch model: {e}"
-
-    def _model_status(self) -> str:
-        """Show current model and available options."""
-        lines = [f"Current model: `{self.model}`", ""]
-        if self.config:
-            p = self.config.providers
-            lines.append("Available shortcuts:")
-            import os
-            has_oauth = p.anthropic.oauth_access_token or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
-            if has_oauth:
-                lines.append("  `/model opus` — Claude Opus 4.6 (OAuth/CLI)")
-                lines.append("  `/model sonnet` — Claude Sonnet 4.5 (OAuth/CLI)")
-                lines.append("  `/model cc` — alias for sonnet via Claude Code")
-            if p.anthropic.api_key:
-                lines.append("  `/model claude` — Claude Sonnet 4.5 (API key)")
-            if p.gemini.api_key:
-                lines.append("  `/model gemini` — Gemini 2.5 Pro")
-                lines.append("  `/model flash` — Gemini 2.5 Flash")
-            lines.append("")
-            lines.append("Or use an explicit model: `/model anthropic/claude-opus-4-6`")
-        return "\n".join(lines)
-
-    def _make_provider_for_model(self, model: str, mode: str = "api") -> LLMProvider:
-        """Create the right provider for a given model and mode."""
-        if not self.config:
-            raise ValueError("No config available")
-
-        p = self.config.providers
-        model_lower = model.lower()
-
-        # OAuth mode — use Claude CLI proxy
-        if mode == "oauth":
-            import os
-            oauth_token = p.anthropic.oauth_access_token or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
-            if not oauth_token:
-                raise ValueError("No OAuth token configured for Anthropic")
-            import shutil
-            from nanobot.providers.anthropic_oauth import AnthropicOAuthProvider
-            claude_bin = shutil.which("claude") or "claude"
-            return AnthropicOAuthProvider(
-                oauth_token=oauth_token,
-                default_model=model,
-                claude_bin=claude_bin,
-            )
-
-        # API key mode — use LiteLLM
-        from nanobot.providers.litellm_provider import LiteLLMProvider
-
-        # Find the right provider config for the target model
-        provider_cfg = self.config.get_provider(model)
-        if not provider_cfg or not provider_cfg.api_key:
-            raise ValueError(f"No API key configured for model `{model}`")
-
-        return LiteLLMProvider(
-            api_key=provider_cfg.api_key,
-            api_base=self.config.get_api_base(model),
-            default_model=model,
-            extra_headers=provider_cfg.extra_headers or {},
-        )
-
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
         Process a system message (e.g., subagent announce).
@@ -382,18 +241,8 @@ class AgentLoop:
         session = self.sessions.get_or_create(session_key)
         
         # Update tool contexts
-        message_tool = self.tools.get("message")
-        if isinstance(message_tool, MessageTool):
-            message_tool.set_context(origin_channel, origin_chat_id)
-        
-        spawn_tool = self.tools.get("spawn")
-        if isinstance(spawn_tool, SpawnTool):
-            spawn_tool.set_context(origin_channel, origin_chat_id)
-        
-        cron_tool = self.tools.get("cron")
-        if isinstance(cron_tool, CronTool):
-            cron_tool.set_context(origin_channel, origin_chat_id)
-        
+        self.tools.set_context(origin_channel, origin_chat_id)
+
         # Build messages with the announce content
         messages = self.context.build_messages(
             history=session.get_history(),
@@ -403,45 +252,14 @@ class AgentLoop:
         )
         
         # Agent loop (limited for announce handling)
-        iteration = 0
-        final_content = None
-        
-        while iteration < self.max_iterations:
-            iteration += 1
-            
-            response = await self.provider.chat(
-                messages=messages,
-                tools=self.tools.get_definitions(),
-                model=self.model
-            )
-            
-            if response.has_tool_calls:
-                tool_call_dicts = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments)
-                        }
-                    }
-                    for tc in response.tool_calls
-                ]
-                messages = self.context.add_assistant_message(
-                    messages, response.content, tool_call_dicts
-                )
-                
-                for tool_call in response.tool_calls:
-                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                    logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
-                    messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result
-                    )
-            else:
-                final_content = response.content
-                break
-        
+        final_content = await run_tool_loop(
+            provider=self.provider,
+            tools=self.tools,
+            messages=messages,
+            model=self.model,
+            max_iterations=self.max_iterations,
+        )
+
         if final_content is None:
             final_content = "Background task completed."
         

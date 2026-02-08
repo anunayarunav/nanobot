@@ -2,13 +2,13 @@
 
 from typing import Any, TYPE_CHECKING
 
-from nanobot.agent.tools.base import Tool
+from nanobot.agent.tools.base import ContextAwareTool
 
 if TYPE_CHECKING:
     from nanobot.agent.subagent import SubagentManager
 
 
-class SpawnTool(Tool):
+class SpawnTool(ContextAwareTool):
     """
     Tool to spawn a subagent for background task execution.
     

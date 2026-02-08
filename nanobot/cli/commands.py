@@ -148,39 +148,21 @@ This file stores important information that should persist across sessions.
 
 
 def _make_provider(config):
-    """Create LLM provider from config. Uses OAuth if configured, else LiteLLM."""
-    import os
-    from nanobot.providers.litellm_provider import LiteLLMProvider
-    p = config.get_provider()
-    model = config.agents.defaults.model
-
-    # Use AnthropicOAuthProvider if OAuth token is configured AND model is Anthropic
-    oauth_token = (p.oauth_access_token if p else "") or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
-    model_is_anthropic = "anthropic" in model.lower() or "claude" in model.lower()
-    if oauth_token and model_is_anthropic:
-        import shutil
-        from nanobot.providers.anthropic_oauth import AnthropicOAuthProvider
-        claude_bin = shutil.which("claude")
-        if not claude_bin:
-            console.print("[red]Error: Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code[/red]")
-            raise typer.Exit(1)
-        console.print("[green]✓[/green] Using Anthropic OAuth via Claude CLI")
-        return AnthropicOAuthProvider(
-            oauth_token=oauth_token,
-            default_model=model,
-            claude_bin=claude_bin,
-        )
-
-    if not (p and p.api_key) and not model.startswith("bedrock/"):
-        console.print("[red]Error: No API key configured.[/red]")
-        console.print("Set one in ~/.nanobot/config.json under providers section")
+    """Create LLM provider from config. Thin wrapper around factory with CLI error display."""
+    from nanobot.providers.factory import make_provider
+    try:
+        provider = make_provider(config)
+        # Check if OAuth was selected (provider class name check)
+        if type(provider).__name__ == "AnthropicOAuthProvider":
+            console.print("[green]✓[/green] Using Anthropic OAuth via Claude CLI")
+        return provider
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        console.print("Set credentials in ~/.nanobot/config.json under providers section")
         raise typer.Exit(1)
-    return LiteLLMProvider(
-        api_key=p.api_key if p else None,
-        api_base=config.get_api_base(),
-        default_model=model,
-        extra_headers=p.extra_headers if p else None,
-    )
+    except FileNotFoundError:
+        console.print("[red]Error: Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code[/red]")
+        raise typer.Exit(1)
 
 
 # ============================================================================
