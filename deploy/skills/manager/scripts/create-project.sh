@@ -62,7 +62,8 @@ cat > "${NANOBOT_DIR}/config.json" << JSONEOF
   },
   "tools": {
     "restrictToWorkspace": true
-  }
+  },
+  "extensions": []
 }
 JSONEOF
 
