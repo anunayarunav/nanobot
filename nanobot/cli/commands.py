@@ -154,9 +154,10 @@ def _make_provider(config):
     p = config.get_provider()
     model = config.agents.defaults.model
 
-    # Use AnthropicOAuthProvider if OAuth token is configured (config or env var)
+    # Use AnthropicOAuthProvider if OAuth token is configured AND model is Anthropic
     oauth_token = (p.oauth_access_token if p else "") or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
-    if oauth_token:
+    model_is_anthropic = "anthropic" in model.lower() or "claude" in model.lower()
+    if oauth_token and model_is_anthropic:
         import shutil
         from nanobot.providers.anthropic_oauth import AnthropicOAuthProvider
         claude_bin = shutil.which("claude")
