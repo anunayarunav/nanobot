@@ -9,7 +9,7 @@ from loguru import logger
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
-from nanobot.agent.commands import CommandHandler
+from nanobot.agent.commands import CommandContext, CommandResult, build_command_registry
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.engine import run_tool_loop
 from nanobot.agent.tools.registry import ToolRegistry
@@ -60,7 +60,7 @@ def _maybe_nudge_tool_use(messages: list[dict[str, Any]]) -> None:
 class AgentLoop:
     """
     The agent loop is the core processing engine.
-    
+
     It:
     1. Receives messages from the bus
     2. Builds context with history, memory, skills
@@ -68,7 +68,7 @@ class AgentLoop:
     4. Executes tool calls
     5. Sends responses back
     """
-    
+
     def __init__(
         self,
         bus: MessageBus,
@@ -95,7 +95,7 @@ class AgentLoop:
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self.config = config
-        
+
         self.context = ContextBuilder(workspace)
         self.sessions = SessionManager(workspace)
         self.tools = ToolRegistry()
@@ -108,13 +108,23 @@ class AgentLoop:
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
         )
-        
-        self.commands = CommandHandler(config) if config else None
+
+        # Command framework
+        allowed = config.commands.allowed if config else None
+        self.command_registry = build_command_registry(config=config, allowed=allowed)
+
+        # Debug levels per session (runtime state, not persisted)
+        self.debug_levels: dict[str, str] = {}
+
+        # Cancellation events per session (for /stop)
+        self.cancel_events: dict[str, asyncio.Event] = {}
+
         self.extensions = extensions or ExtensionManager()
 
         self._running = False
+        self._processing_task: asyncio.Task[None] | None = None
         self._register_default_tools()
-    
+
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
         # File tools (restrict to workspace if configured)
@@ -123,7 +133,7 @@ class AgentLoop:
         self.tools.register(WriteFileTool(allowed_dir=allowed_dir))
         self.tools.register(EditFileTool(allowed_dir=allowed_dir))
         self.tools.register(ListDirTool(allowed_dir=allowed_dir))
-        
+
         # Shell tool
         self.tools.register(ExecTool(
             working_dir=str(self.workspace),
@@ -131,11 +141,11 @@ class AgentLoop:
             restrict_to_workspace=self.restrict_to_workspace,
             allowed_git_repos=self.exec_config.allowed_git_repos,
         ))
-        
+
         # Web tools
         self.tools.register(WebSearchTool(api_key=self.brave_api_key))
         self.tools.register(WebFetchTool())
-        
+
         # Message tool
         message_tool = MessageTool(send_callback=self.bus.publish_outbound)
         self.tools.register(message_tool)
@@ -152,15 +162,17 @@ class AgentLoop:
             self.tools.register(CronTool(self.cron_service))
 
     def _make_progress_callback(
-        self, channel: str, chat_id: str,
+        self, channel: str, chat_id: str, session_key: str,
     ) -> "Callable[[str, dict[str, Any]], Awaitable[None]]":
-        """Create a callback that sends progress messages for slow tools."""
+        """Create a callback that respects debug level for progress messages."""
         from collections.abc import Callable, Awaitable
 
         async def _notify(name: str, args: dict[str, Any]) -> None:
-            if name not in _SLOW_TOOLS:
+            level = self.debug_levels.get(session_key, "moderate")
+            if level == "none":
                 return
-            # Heartbeat — periodic "still running" update
+
+            # Heartbeat — periodic "still running" update (all + moderate)
             if args.get("_heartbeat"):
                 elapsed = args["elapsed"]
                 mins, secs = divmod(elapsed, 60)
@@ -170,7 +182,25 @@ class AgentLoop:
                     content=f"⏳ Still running... ({label})",
                 ))
                 return
-            # Initial notification
+
+            # "all" mode: show every tool call with args
+            if level == "all":
+                args_parts = []
+                for k, v in args.items():
+                    v_str = str(v)
+                    if len(v_str) > 80:
+                        v_str = v_str[:80] + "..."
+                    args_parts.append(f"{k}={v_str}")
+                args_display = ", ".join(args_parts)
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=channel, chat_id=chat_id,
+                    content=f"🔧 `{name}({args_display})`",
+                ))
+                return
+
+            # "moderate" mode: only slow tools
+            if name not in _SLOW_TOOLS:
+                return
             if name == "exec":
                 detail = str(args.get("command", ""))
             elif name == "web_search":
@@ -186,66 +216,135 @@ class AgentLoop:
 
         return _notify
 
+    async def _dispatch_command(self, msg: InboundMessage) -> OutboundMessage | None:
+        """Dispatch a slash command and handle side-effects."""
+        ctx = CommandContext(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            session_key=msg.session_key,
+            raw_args="",
+            agent_loop=self,
+        )
+        result = await self.command_registry.dispatch(msg.content, ctx)
+        if not result:
+            return None
+
+        # Side-effects: model switch
+        if result.new_provider and result.new_model:
+            self.provider = result.new_provider
+            self.model = result.new_model
+            self.subagents.provider = result.new_provider
+            self.subagents.model = result.new_model
+
+        # Side-effects: retry re-queue
+        if result.requeue_message:
+            await self.bus.publish_inbound(InboundMessage(
+                channel=msg.channel,
+                sender_id=msg.sender_id,
+                chat_id=msg.chat_id,
+                content=result.requeue_message,
+            ))
+
+        if result.message:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=result.message,
+            )
+        return None
+
     async def run(self) -> None:
-        """Run the agent loop, processing messages from the bus."""
+        """Run the agent loop, processing messages from the bus.
+
+        Messages are processed as asyncio tasks so that interrupt commands
+        (/stop) can be handled while a tool loop is running.
+        """
         self._running = True
         logger.info("Agent loop started")
-        
+
         while self._running:
             try:
-                # Wait for next message
                 msg = await asyncio.wait_for(
                     self.bus.consume_inbound(),
                     timeout=1.0
                 )
-                
-                # Process it
-                try:
-                    response = await self._process_message(msg)
-                    if response:
-                        await self.bus.publish_outbound(response)
-                except Exception as e:
-                    logger.error(f"Error processing message: {e}")
-                    # Send error response
-                    await self.bus.publish_outbound(OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=f"Sorry, I encountered an error: {str(e)}"
-                    ))
             except asyncio.TimeoutError:
                 continue
-    
+
+            try:
+                # Interrupt commands (/stop) take effect immediately
+                if self.command_registry.is_interrupt(msg.content):
+                    response = await self._dispatch_command(msg)
+                    if response:
+                        await self.bus.publish_outbound(response)
+                    continue
+
+                # Non-interrupt commands dispatch inline
+                if self.command_registry.is_command(msg.content):
+                    # Wait for any running processing to finish first
+                    if self._processing_task and not self._processing_task.done():
+                        await self._processing_task
+                    response = await self._dispatch_command(msg)
+                    if response:
+                        await self.bus.publish_outbound(response)
+                    continue
+
+                # Regular message — wait for previous processing, then start new task
+                if self._processing_task and not self._processing_task.done():
+                    await self._processing_task
+
+                cancel_event = asyncio.Event()
+                self.cancel_events[msg.session_key] = cancel_event
+                self._processing_task = asyncio.create_task(
+                    self._process_and_respond(msg, cancel_event)
+                )
+            except Exception as e:
+                logger.error(f"Error handling message: {e}")
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=f"Sorry, I encountered an error: {str(e)}"
+                ))
+
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
         logger.info("Agent loop stopping")
-    
-    async def _process_message(self, msg: InboundMessage) -> OutboundMessage | None:
+
+    async def _process_and_respond(
+        self, msg: InboundMessage, cancel_event: asyncio.Event,
+    ) -> None:
+        """Process a message and publish the response. Wraps _process_message for task use."""
+        try:
+            response = await self._process_message(msg, cancel_event)
+            if response:
+                await self.bus.publish_outbound(response)
+        except Exception as e:
+            logger.error(f"Error processing message: {e}")
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"Sorry, I encountered an error: {str(e)}"
+            ))
+        finally:
+            self.cancel_events.pop(msg.session_key, None)
+
+    async def _process_message(
+        self, msg: InboundMessage, cancel_event: asyncio.Event | None = None,
+    ) -> OutboundMessage | None:
         """
         Process a single inbound message.
-        
+
         Args:
             msg: The inbound message to process.
-        
+            cancel_event: Optional cancellation event for /stop support.
+
         Returns:
             The response message, or None if no response needed.
         """
         # Handle system messages (subagent announces)
-        # The chat_id contains the original "channel:chat_id" to route back to
         if msg.channel == "system":
             return await self._process_system_message(msg)
-
-        # Handle /model command
-        if msg.content.strip().startswith("/model") and self.commands:
-            status_msg, new_model, new_provider = self.commands.handle_model(
-                msg.content.strip(), self.model
-            )
-            if new_provider and new_model:
-                self.provider = new_provider
-                self.model = new_model
-                self.subagents.provider = new_provider
-                self.subagents.model = new_model
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=status_msg)
 
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
@@ -275,10 +374,6 @@ class AgentLoop:
         )
         messages = await self.extensions.transform_messages(messages, ctx)
 
-        # Tool-use nudge for legacy/fresh sessions: when history has
-        # messages but none carry tool_calls, the model tends to respond
-        # text-only.  A short system reminder fixes this cheaply (~30 tokens)
-        # and self-disables once real tool_calls appear in the session.
         _maybe_nudge_tool_use(messages)
 
         # Agent loop
@@ -289,7 +384,8 @@ class AgentLoop:
             messages=messages,
             model=self.model,
             max_iterations=self.max_iterations,
-            on_tool_call=self._make_progress_callback(msg.channel, msg.chat_id),
+            on_tool_call=self._make_progress_callback(msg.channel, msg.chat_id, msg.session_key),
+            cancel_event=cancel_event,
         )
 
         if not final_content:
@@ -330,16 +426,16 @@ class AgentLoop:
             chat_id=msg.chat_id,
             content=final_content
         )
-    
+
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
         Process a system message (e.g., subagent announce).
-        
+
         The chat_id field contains "original_channel:original_chat_id" to route
         the response back to the correct destination.
         """
         logger.info(f"Processing system message from {msg.sender_id}")
-        
+
         # Parse origin from chat_id (format: "channel:chat_id")
         if ":" in msg.chat_id:
             parts = msg.chat_id.split(":", 1)
@@ -349,7 +445,7 @@ class AgentLoop:
             # Fallback
             origin_channel = "cli"
             origin_chat_id = msg.chat_id
-        
+
         # Use the origin session for context
         session_key = f"{origin_channel}:{origin_chat_id}"
         session = self.sessions.get_or_create(session_key)
@@ -385,7 +481,7 @@ class AgentLoop:
             messages=messages,
             model=self.model,
             max_iterations=self.max_iterations,
-            on_tool_call=self._make_progress_callback(origin_channel, origin_chat_id),
+            on_tool_call=self._make_progress_callback(origin_channel, origin_chat_id, session_key),
         )
 
         if not final_content:
@@ -414,13 +510,13 @@ class AgentLoop:
         # HOOK: pre_session_save
         await self.extensions.pre_session_save(session, ctx)
         self.sessions.save(session)
-        
+
         return OutboundMessage(
             channel=origin_channel,
             chat_id=origin_chat_id,
             content=final_content
         )
-    
+
     async def process_direct(
         self,
         content: str,
@@ -430,13 +526,13 @@ class AgentLoop:
     ) -> str:
         """
         Process a message directly (for CLI or cron usage).
-        
+
         Args:
             content: The message content.
             session_key: Session identifier.
             channel: Source channel (for context).
             chat_id: Source chat ID (for context).
-        
+
         Returns:
             The agent's response.
         """
@@ -446,6 +542,11 @@ class AgentLoop:
             chat_id=chat_id,
             content=content
         )
-        
+
+        # Handle commands from CLI too
+        if self.command_registry.is_command(content):
+            response = await self._dispatch_command(msg)
+            return response.content if response else ""
+
         response = await self._process_message(msg)
         return response.content if response else ""

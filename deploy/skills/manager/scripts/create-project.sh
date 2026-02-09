@@ -63,6 +63,9 @@ cat > "${NANOBOT_DIR}/config.json" << JSONEOF
   "tools": {
     "restrictToWorkspace": true
   },
+  "commands": {
+    "allowed": ["model", "help"]
+  },
   "extensions": []
 }
 JSONEOF

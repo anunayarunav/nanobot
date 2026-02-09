@@ -253,6 +253,34 @@ Higher values let the bot chain more tool calls before stopping.
    echo "$(date -Iseconds) CONFIG project={project} maxToolIterations={value}" >> /home/deploy/bots/audit.log
    ```
 
+### Configure Allowed Commands
+
+Control which slash commands are available to a worker bot's users. Commands not in the allowlist are rejected.
+
+Available commands: `model`, `debug`, `stop`, `clear`, `undo`, `retry`, `session`, `config`, `ls`, `cat`, `help`
+
+Default for new projects: `["model", "help"]`
+
+1. Read config: `cat /home/deploy/bots/{project}/.nanobot/config.json`
+2. Backup: `cp /home/deploy/bots/{project}/.nanobot/config.json /home/deploy/bots/{project}/.nanobot/config.json.bak`
+3. Use edit_file to set `commands.allowed` to the desired list, e.g.:
+   - Minimal: `"allowed": ["model", "help"]`
+   - Dev mode: `"allowed": ["model", "debug", "stop", "clear", "undo", "retry", "session", "config", "ls", "cat", "help"]`
+4. Restart: `sudo systemctl restart nanobot@{project}`
+5. Log:
+   ```bash
+   echo "$(date -Iseconds) CONFIG project={project} commands.allowed=[list]" >> /home/deploy/bots/audit.log
+   ```
+
+If the `commands` key doesn't exist yet in the config, add it at the top level:
+```json
+{
+  "commands": {
+    "allowed": ["model", "debug", "stop", "help"]
+  }
+}
+```
+
 ### Update a Project's Instructions
 
 Use write_file to update:

@@ -131,6 +131,11 @@ class ExtensionConfig(BaseModel):
     options: dict[str, Any] = Field(default_factory=dict)
 
 
+class CommandsConfig(BaseModel):
+    """Slash command allowlist. Master bot controls which commands each worker gets."""
+    allowed: list[str] = Field(default_factory=lambda: ["model", "help"])
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
@@ -139,6 +144,7 @@ class Config(BaseSettings):
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     extensions: list[ExtensionConfig] = Field(default_factory=list)
+    commands: CommandsConfig = Field(default_factory=CommandsConfig)
     
     @property
     def workspace_path(self) -> Path:

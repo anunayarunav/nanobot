@@ -96,6 +96,7 @@ async def run_tool_loop(
     max_iterations: int = 20,
     log_prefix: str = "",
     on_tool_call: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+    cancel_event: asyncio.Event | None = None,
 ) -> str | None:
     """Run the LLM tool-calling loop until a final text response or max iterations.
 
@@ -108,6 +109,7 @@ async def run_tool_loop(
         log_prefix: Optional prefix for log messages (e.g. "Subagent [abc123]").
         on_tool_call: Optional async callback fired before each tool execution.
             Receives (tool_name, arguments). Used for progress notifications.
+        cancel_event: Optional event set by /stop to cancel the loop.
 
     Returns:
         The final text content, or None if max_iterations hit without a text response.
@@ -116,6 +118,11 @@ async def run_tool_loop(
     empty_retries = 0
 
     for _ in range(max_iterations):
+        # Check cancellation before each iteration
+        if cancel_event and cancel_event.is_set():
+            logger.info(f"{prefix}Tool loop cancelled by user")
+            return "[Operation cancelled by user]"
+
         response = await provider.chat(
             messages=messages,
             tools=tools.get_definitions(),
@@ -158,6 +165,11 @@ async def run_tool_loop(
 
         # Execute each tool call and append results
         for tool_call in response.tool_calls:
+            # Check cancellation before each tool execution
+            if cancel_event and cancel_event.is_set():
+                logger.info(f"{prefix}Tool loop cancelled before executing {tool_call.name}")
+                return "[Operation cancelled by user]"
+
             args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
             logger.info(f"{prefix}Tool call: {tool_call.name}({args_str[:200]})")
             if on_tool_call:
