@@ -49,10 +49,10 @@ class AnthropicOAuthProvider(LLMProvider):
         # Build the prompt from messages
         prompt = self._build_prompt(messages)
 
-        # Claude CLI args
+        # Claude CLI args — prompt is piped via stdin to avoid ARG_MAX limits
         args = [
             self.claude_bin,
-            "-p", prompt,
+            "-p",
             "--model", model,
             "--output-format", "json",
             "--dangerously-skip-permissions",
@@ -63,12 +63,13 @@ class AnthropicOAuthProvider(LLMProvider):
         try:
             proc = await asyncio.create_subprocess_exec(
                 *args,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=600.0
+                proc.communicate(input=prompt.encode()), timeout=600.0
             )
 
             if proc.returncode != 0:
