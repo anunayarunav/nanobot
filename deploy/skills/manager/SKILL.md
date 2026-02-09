@@ -239,6 +239,20 @@ tail -20 /home/deploy/bots/audit.log
 3. Use edit_file to change `agents.defaults.model`
 4. Restart: `sudo systemctl restart nanobot@{project}`
 
+### Configure Max Iterations
+
+Adjust how many tool-calling iterations a worker bot can perform per message (default: 20).
+Higher values let the bot chain more tool calls before stopping.
+
+1. Read config: `cat /home/deploy/bots/{project}/.nanobot/config.json`
+2. Backup: `cp /home/deploy/bots/{project}/.nanobot/config.json /home/deploy/bots/{project}/.nanobot/config.json.bak`
+3. Use edit_file to change `maxToolIterations` inside `agents.defaults` to the new value
+4. Restart: `sudo systemctl restart nanobot@{project}`
+5. Log:
+   ```bash
+   echo "$(date -Iseconds) CONFIG project={project} maxToolIterations={value}" >> /home/deploy/bots/audit.log
+   ```
+
 ### Update a Project's Instructions
 
 Use write_file to update:
