@@ -153,18 +153,17 @@ class TelegramChannel(BaseChannel):
             .build()
         )
         
-        # Add message handler for text, photos, voice, documents
+        # Add /start command handler (must be before the general message handler)
+        from telegram.ext import CommandHandler
+        self._app.add_handler(CommandHandler("start", self._on_start))
+
+        # Add message handler for text (including /commands), photos, voice, documents
         self._app.add_handler(
             MessageHandler(
-                (filters.TEXT | filters.PHOTO | filters.VOICE | filters.AUDIO | filters.Document.ALL) 
-                & ~filters.COMMAND, 
+                filters.TEXT | filters.PHOTO | filters.VOICE | filters.AUDIO | filters.Document.ALL,
                 self._on_message
             )
         )
-        
-        # Add /start command handler
-        from telegram.ext import CommandHandler
-        self._app.add_handler(CommandHandler("start", self._on_start))
         
         logger.info("Starting Telegram bot (polling mode)...")
         
