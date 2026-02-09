@@ -6,6 +6,7 @@ from pathlib import Path
 
 from loguru import logger
 from telegram import InputMediaPhoto, InputMediaVideo, Update
+from telegram.error import NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
 from nanobot.bus.events import OutboundMessage
@@ -18,6 +19,44 @@ _PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 _AUDIO_EXTS = {".mp3", ".ogg", ".m4a", ".wav", ".flac"}
 _GROUPABLE_EXTS = _PHOTO_EXTS | _VIDEO_EXTS  # can go into a media group
+
+_TG_MAX_LENGTH = 4096
+_SEND_RETRIES = 3
+
+
+def _chunk_text(text: str, max_len: int = _TG_MAX_LENGTH) -> list[str]:
+    """Split text into chunks that fit Telegram's message limit.
+
+    Splits at paragraph boundaries, then line boundaries, then hard cuts.
+    """
+    if len(text) <= max_len:
+        return [text]
+
+    chunks: list[str] = []
+    while text:
+        if len(text) <= max_len:
+            chunks.append(text)
+            break
+
+        # Try paragraph boundary
+        cut = text.rfind("\n\n", 0, max_len)
+        if cut > max_len // 4:
+            chunks.append(text[:cut])
+            text = text[cut + 2:]
+            continue
+
+        # Try line boundary
+        cut = text.rfind("\n", 0, max_len)
+        if cut > max_len // 4:
+            chunks.append(text[:cut])
+            text = text[cut + 1:]
+            continue
+
+        # Hard cut
+        chunks.append(text[:max_len])
+        text = text[max_len:]
+
+    return chunks
 
 
 def _markdown_to_telegram_html(text: str) -> str:
@@ -251,18 +290,53 @@ class TelegramChannel(BaseChannel):
             logger.error(f"Failed to send media {file_path}: {e}")
 
     async def _send_text(self, chat_id: int, content: str) -> None:
-        """Send text with HTML formatting, falling back to plain text."""
-        try:
-            html_content = _markdown_to_telegram_html(content)
-            await self._app.bot.send_message(
-                chat_id=chat_id, text=html_content, parse_mode="HTML",
-            )
-        except Exception as e:
-            logger.warning(f"HTML parse failed, falling back to plain text: {e}")
+        """Send text with chunking, HTML formatting, and retry."""
+        chunks = _chunk_text(content)
+        for chunk in chunks:
+            if not await self._send_text_chunk(chat_id, chunk):
+                try:
+                    await self._app.bot.send_message(
+                        chat_id=chat_id,
+                        text="[Message delivery failed. Please retry your request.]",
+                    )
+                except Exception:
+                    pass
+                return
+
+    async def _send_text_chunk(self, chat_id: int, text: str) -> bool:
+        """Send a single text chunk with HTML fallback. Returns True on success."""
+        html = _markdown_to_telegram_html(text)
+        if len(html) <= _TG_MAX_LENGTH:
+            if await self._try_send(chat_id, html, parse_mode="HTML"):
+                return True
+        # HTML too long or parse error — fall back to plain text
+        return await self._try_send(chat_id, text)
+
+    async def _try_send(
+        self, chat_id: int, text: str, parse_mode: str | None = None,
+    ) -> bool:
+        """Send a message with retries for transient errors. Returns True on success."""
+        for attempt in range(_SEND_RETRIES):
             try:
-                await self._app.bot.send_message(chat_id=chat_id, text=content)
-            except Exception as e2:
-                logger.error(f"Error sending Telegram message: {e2}")
+                await self._app.bot.send_message(
+                    chat_id=chat_id, text=text, parse_mode=parse_mode,
+                )
+                return True
+            except RetryAfter as e:
+                logger.warning(f"Rate limited, waiting {e.retry_after}s")
+                await asyncio.sleep(e.retry_after)
+            except (NetworkError, TimedOut) as e:
+                if attempt < _SEND_RETRIES - 1:
+                    wait = (attempt + 1) * 1.5
+                    logger.warning(f"Network error (attempt {attempt + 1}/{_SEND_RETRIES}): {e}, retrying in {wait}s")
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error(f"Send failed after {_SEND_RETRIES} attempts: {e}")
+                    return False
+            except Exception as e:
+                logger.error(f"Send failed: {e}")
+                return False
+        return False
     
     async def _on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /start command."""

@@ -10,7 +10,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
 from nanobot.agent.commands import CommandHandler
 from nanobot.agent.context import ContextBuilder
-from nanobot.agent.engine import run_tool_loop, strip_tool_context, summarize_tool_actions
+from nanobot.agent.engine import run_tool_loop, summarize_tool_actions
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
 from nanobot.agent.tools.shell import ExecTool
@@ -221,9 +221,6 @@ class AgentLoop:
         if not final_content:
             final_content = "I processed your request but wasn't able to generate a text response. Could you try rephrasing or asking again?"
 
-        # Strip any <tool_context> the LLM parroted from history
-        final_content = strip_tool_context(final_content)
-
         # HOOK: transform_response
         final_content = await self.extensions.transform_response(final_content, ctx)
 
@@ -231,11 +228,12 @@ class AgentLoop:
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
 
-        # Save to session — enrich with tool context so LLM retains workspace knowledge
-        tool_summary = summarize_tool_actions(messages, pre_loop_len)
-        session_content = f"{tool_summary}\n\n{final_content}" if tool_summary else final_content
+        # Save to session
         session.add_message("user", msg.content)
-        session.add_message("assistant", session_content)
+        tool_summary = summarize_tool_actions(messages, pre_loop_len)
+        if tool_summary:
+            session.add_message("user", f"[System: tool execution log]\n{tool_summary}")
+        session.add_message("assistant", final_content)
 
         # HOOK: pre_session_save
         await self.extensions.pre_session_save(session, ctx)
@@ -304,17 +302,15 @@ class AgentLoop:
         if not final_content:
             final_content = "Background task completed."
 
-        # Strip any <tool_context> the LLM parroted from history
-        final_content = strip_tool_context(final_content)
-
         # HOOK: transform_response
         final_content = await self.extensions.transform_response(final_content, ctx)
 
-        # Save to session — enrich with tool context
-        tool_summary = summarize_tool_actions(messages, pre_loop_len)
-        session_content = f"{tool_summary}\n\n{final_content}" if tool_summary else final_content
+        # Save to session
         session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
-        session.add_message("assistant", session_content)
+        tool_summary = summarize_tool_actions(messages, pre_loop_len)
+        if tool_summary:
+            session.add_message("user", f"[System: tool execution log]\n{tool_summary}")
+        session.add_message("assistant", final_content)
 
         # HOOK: pre_session_save
         await self.extensions.pre_session_save(session, ctx)
