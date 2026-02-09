@@ -140,7 +140,10 @@ class ExecTool(Tool):
             cmd_no_urls = re.sub(r"\S+@\S+:\S+", "", cmd_no_urls)  # git@host:path
 
             win_paths = re.findall(r"[A-Za-z]:\\[^\\\"']+", cmd_no_urls)
-            posix_paths = re.findall(r"/[^\s\"']+", cmd_no_urls)
+            # Only match absolute paths: /path must be preceded by whitespace,
+            # start of string, or shell operators — NOT by a word character
+            # (which would mean it's a relative path component like "foo/bar").
+            posix_paths = re.findall(r"(?:^|(?<=\s)|(?<=[=;|&(]))(/[^\s\"']+)", cmd_no_urls)
 
             for raw in win_paths + posix_paths:
                 try:
