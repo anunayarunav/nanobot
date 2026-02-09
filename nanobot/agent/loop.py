@@ -161,13 +161,13 @@ class AgentLoop:
             if name not in _SLOW_TOOLS:
                 return
             if name == "exec":
-                detail = str(args.get("command", ""))[:100]
+                detail = str(args.get("command", ""))
             elif name == "web_search":
-                detail = str(args.get("query", ""))[:100]
+                detail = str(args.get("query", ""))
             elif name == "web_fetch":
-                detail = str(args.get("url", ""))[:100]
+                detail = str(args.get("url", ""))
             else:
-                detail = str(args.get("task", ""))[:100]
+                detail = str(args.get("task", ""))
             await self.bus.publish_outbound(OutboundMessage(
                 channel=channel, chat_id=chat_id,
                 content=f"⏳ `{name}`: {detail}",
