@@ -160,6 +160,17 @@ class AgentLoop:
         async def _notify(name: str, args: dict[str, Any]) -> None:
             if name not in _SLOW_TOOLS:
                 return
+            # Heartbeat — periodic "still running" update
+            if args.get("_heartbeat"):
+                elapsed = args["elapsed"]
+                mins, secs = divmod(elapsed, 60)
+                label = f"{mins}m{secs}s" if mins else f"{secs}s"
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=channel, chat_id=chat_id,
+                    content=f"⏳ Still running... ({label})",
+                ))
+                return
+            # Initial notification
             if name == "exec":
                 detail = str(args.get("command", ""))
             elif name == "web_search":

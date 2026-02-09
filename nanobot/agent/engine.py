@@ -1,10 +1,13 @@
 """Shared tool execution loop used by agent and subagent."""
 
+import asyncio
 import json
 from collections.abc import Callable, Awaitable
 from typing import Any
 
 from loguru import logger
+
+_HEARTBEAT_INTERVAL = 30  # seconds between "still running" notifications
 
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.providers.base import LLMProvider
@@ -65,6 +68,24 @@ def summarize_tool_actions(messages: list[dict[str, Any]], start_index: int) -> 
         lines.append(f"- {a['name']}({a['args']}){result_part}")
 
     return "<tool_context>\n" + "\n".join(lines) + "\n</tool_context>"
+
+
+async def _execute_with_heartbeat(
+    tools: ToolRegistry,
+    name: str,
+    arguments: dict[str, Any],
+    on_tool_call: Callable[[str, dict[str, Any]], Awaitable[None]] | None,
+) -> str:
+    """Execute a tool, sending periodic heartbeat notifications for slow calls."""
+    task = asyncio.create_task(tools.execute(name, arguments))
+    elapsed = 0
+    while True:
+        done, _ = await asyncio.wait({task}, timeout=_HEARTBEAT_INTERVAL)
+        if done:
+            return task.result()
+        elapsed += _HEARTBEAT_INTERVAL
+        if on_tool_call:
+            await on_tool_call(name, {"_heartbeat": True, "elapsed": elapsed})
 
 
 async def run_tool_loop(
@@ -141,7 +162,9 @@ async def run_tool_loop(
             logger.info(f"{prefix}Tool call: {tool_call.name}({args_str[:200]})")
             if on_tool_call:
                 await on_tool_call(tool_call.name, tool_call.arguments)
-            result = await tools.execute(tool_call.name, tool_call.arguments)
+            result = await _execute_with_heartbeat(
+                tools, tool_call.name, tool_call.arguments, on_tool_call,
+            )
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call.id,
