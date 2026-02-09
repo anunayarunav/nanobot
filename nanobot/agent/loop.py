@@ -10,7 +10,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
 from nanobot.agent.commands import CommandHandler
 from nanobot.agent.context import ContextBuilder
-from nanobot.agent.engine import run_tool_loop
+from nanobot.agent.engine import run_tool_loop, summarize_tool_actions
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
 from nanobot.agent.tools.shell import ExecTool
@@ -209,6 +209,7 @@ class AgentLoop:
         messages = await self.extensions.transform_messages(messages, ctx)
 
         # Agent loop
+        pre_loop_len = len(messages)
         final_content = await run_tool_loop(
             provider=self.provider,
             tools=self.tools,
@@ -227,9 +228,11 @@ class AgentLoop:
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
 
-        # Save to session
+        # Save to session — enrich with tool context so LLM retains workspace knowledge
+        tool_summary = summarize_tool_actions(messages, pre_loop_len)
+        session_content = f"{tool_summary}\n\n{final_content}" if tool_summary else final_content
         session.add_message("user", msg.content)
-        session.add_message("assistant", final_content)
+        session.add_message("assistant", session_content)
 
         # HOOK: pre_session_save
         await self.extensions.pre_session_save(session, ctx)
@@ -286,6 +289,7 @@ class AgentLoop:
         messages = await self.extensions.transform_messages(messages, ctx)
 
         # Agent loop (limited for announce handling)
+        pre_loop_len = len(messages)
         final_content = await run_tool_loop(
             provider=self.provider,
             tools=self.tools,
@@ -300,9 +304,11 @@ class AgentLoop:
         # HOOK: transform_response
         final_content = await self.extensions.transform_response(final_content, ctx)
 
-        # Save to session (mark as system message in history)
+        # Save to session — enrich with tool context
+        tool_summary = summarize_tool_actions(messages, pre_loop_len)
+        session_content = f"{tool_summary}\n\n{final_content}" if tool_summary else final_content
         session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
-        session.add_message("assistant", final_content)
+        session.add_message("assistant", session_content)
 
         # HOOK: pre_session_save
         await self.extensions.pre_session_save(session, ctx)

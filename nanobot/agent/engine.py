@@ -9,6 +9,63 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.providers.base import LLMProvider
 
 
+def summarize_tool_actions(messages: list[dict[str, Any]], start_index: int) -> str:
+    """Build a compact text summary of tool actions from messages added during the tool loop.
+
+    Args:
+        messages: The full messages list (mutated by run_tool_loop).
+        start_index: Index where tool loop messages begin.
+
+    Returns:
+        A compact summary string, or empty string if no tool calls were made.
+    """
+    actions: list[dict[str, str]] = []
+
+    for msg in messages[start_index:]:
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            for tc in msg["tool_calls"]:
+                func = tc.get("function", {})
+                name = func.get("name", "?")
+                raw_args = func.get("arguments", "{}")
+                if isinstance(raw_args, str):
+                    try:
+                        parsed = json.loads(raw_args)
+                    except json.JSONDecodeError:
+                        parsed = {}
+                else:
+                    parsed = raw_args
+
+                arg_parts = []
+                for k, v in parsed.items():
+                    v_str = str(v)
+                    if len(v_str) > 120:
+                        v_str = v_str[:120] + "..."
+                    arg_parts.append(f"{k}={v_str}")
+                args_display = ", ".join(arg_parts)
+
+                actions.append({"id": tc["id"], "name": name, "args": args_display})
+
+        elif msg.get("role") == "tool":
+            tc_id = msg.get("tool_call_id", "")
+            result = msg.get("content", "")
+            for action in reversed(actions):
+                if action.get("id") == tc_id:
+                    if len(result) > 200:
+                        result = result[:200] + "..."
+                    action["result"] = result
+                    break
+
+    if not actions:
+        return ""
+
+    lines = []
+    for a in actions:
+        result_part = f" -> {a['result']}" if a.get("result") else ""
+        lines.append(f"- {a['name']}({a['args']}){result_part}")
+
+    return "<tool_context>\n" + "\n".join(lines) + "\n</tool_context>"
+
+
 async def run_tool_loop(
     provider: LLMProvider,
     tools: ToolRegistry,
