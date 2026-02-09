@@ -18,6 +18,11 @@ from nanobot.extensions.compaction import (
 from nanobot.session.manager import Session
 
 
+# ===========================================================================
+# Helpers
+# ===========================================================================
+
+
 def _ctx(workspace: str) -> ExtensionContext:
     return ExtensionContext(
         channel="test", chat_id="123", session_key="test:123", workspace=workspace,
@@ -277,7 +282,7 @@ def test_end_to_end_compact_then_history():
         assert len(session.messages) < 10
 
         # Now simulate the next message: get_history → transform_history
-        history = [{"role": m["role"], "content": m["content"]} for m in session.messages[-5:]]
+        history = session.get_history()
         result = asyncio.get_event_loop().run_until_complete(
             ext.transform_history(history, session, ctx)
         )
@@ -287,3 +292,66 @@ def test_end_to_end_compact_then_history():
         assert "Context from earlier conversation" in result[0]["content"]
     finally:
         shutil.rmtree(tmp)
+
+
+# ===========================================================================
+# transform_history — token-based trimming
+# ===========================================================================
+
+
+def test_trim_to_budget_under_budget():
+    """Messages under budget are returned unchanged."""
+    messages = [
+        {"role": "user", "content": "a" * 40},
+        {"role": "assistant", "content": "b" * 40},
+    ]
+    result = CompactionExtension._trim_to_budget(messages, budget=100)
+    assert result == messages
+
+
+def test_trim_to_budget_over_budget():
+    """Messages over budget are trimmed from the front, keeping most recent."""
+    messages = [
+        {"role": "user", "content": "a" * 400},       # ~100 tokens + 4
+        {"role": "assistant", "content": "b" * 400},   # ~100 tokens + 4
+        {"role": "user", "content": "c" * 400},        # ~100 tokens + 4
+        {"role": "assistant", "content": "d" * 400},   # ~100 tokens + 4
+    ]
+    # Budget of 220 tokens — should fit last ~2 messages
+    result = CompactionExtension._trim_to_budget(messages, budget=220)
+    assert len(result) < len(messages)
+    # Most recent messages should be kept
+    assert result[-1]["content"].startswith("d")
+
+
+def test_trim_to_budget_always_keeps_last_message():
+    """Even if a single message exceeds budget, it's still returned."""
+    messages = [
+        {"role": "user", "content": "x" * 8000},  # ~2000 tokens
+    ]
+    result = CompactionExtension._trim_to_budget(messages, budget=100)
+    assert len(result) == 1
+    assert result[0] == messages[0]
+
+
+def test_transform_history_trims_large_history():
+    """transform_history should trim history that exceeds token budget."""
+    ext = CompactionExtension()
+    ext.max_tokens = 1000
+    ext.context_headroom = 200  # history budget = 800 tokens
+    session = Session(key="test:123")
+
+    # Create history with ~1600 tokens (well over 800 budget)
+    history = []
+    for i in range(16):
+        role = "user" if i % 2 == 0 else "assistant"
+        history.append({"role": role, "content": f"msg{i} " + "x" * 390})
+
+    result = asyncio.get_event_loop().run_until_complete(
+        ext.transform_history(history, session, _ctx("/tmp"))
+    )
+
+    # Should be trimmed
+    assert len(result) < len(history)
+    result_tokens = estimate_messages_tokens(result)
+    assert result_tokens <= 800

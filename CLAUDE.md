@@ -81,6 +81,7 @@ Tools that need per-message channel/chat_id (MessageTool, SpawnTool, CronTool) i
 - **Session keys** are `channel:chat_id` strings. Colons in chat IDs could cause collisions (known limitation).
 - **Config camelCase/snake_case** — VPS config files use camelCase. If you edit config programmatically, use `config/loader.py` save/load which handles conversion.
 - **Telegram polling** gets transient `httpx.ReadError` — this auto-recovers, not a bug.
+- **Context management** — `Session.get_history()` returns ALL messages. Token-based trimming is handled exclusively by `CompactionExtension.transform_history()`. Do not add message-count caps — the extension's token budget is the single source of truth.
 
 ## What NOT to Do
 

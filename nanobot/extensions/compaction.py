@@ -37,10 +37,11 @@ def estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
 
 
 class CompactionExtension(Extension):
-    """Archives old session messages when token count exceeds threshold.
+    """Sole context manager: trims history to token budget and archives old messages.
 
     Config options:
-        max_tokens: int = 170000  — compact when history exceeds this token count
+        max_tokens: int = 170000  — total token budget for the model context
+        context_headroom: int = 20000  — tokens reserved for system prompt, tools, current message
         archive_dir: str = "sessions/archives" — relative to workspace
     """
 
@@ -48,25 +49,58 @@ class CompactionExtension(Extension):
 
     def __init__(self) -> None:
         self.max_tokens: int = 170_000
+        self.context_headroom: int = 20_000
         self.archive_dir: str = "sessions/archives"
 
     async def on_load(self, config: dict[str, Any]) -> None:
         self.max_tokens = config.get("max_tokens", 170_000)
+        self.context_headroom = config.get("context_headroom", 20_000)
         self.archive_dir = config.get("archive_dir", "sessions/archives")
 
     async def transform_history(
         self, history: list[dict[str, Any]], session: Any, ctx: ExtensionContext
     ) -> list[dict[str, Any]]:
-        """Prepend compaction summary to history if one exists."""
-        summary = session.metadata.get("compaction_summary")
-        if not summary:
-            return history
+        """Trim history to token budget and prepend compaction summary."""
+        budget = self.max_tokens - self.context_headroom
+        history = self._trim_to_budget(history, budget)
 
-        summary_msg = {
-            "role": "user",
-            "content": f"[Context from earlier conversation:\n{summary}]",
-        }
-        return [summary_msg] + history
+        summary = session.metadata.get("compaction_summary")
+        if summary:
+            summary_msg = {
+                "role": "user",
+                "content": f"[Context from earlier conversation:\n{summary}]",
+            }
+            return [summary_msg] + history
+
+        return history
+
+    @staticmethod
+    def _trim_to_budget(
+        messages: list[dict[str, Any]], budget: int
+    ) -> list[dict[str, Any]]:
+        """Keep the most recent messages that fit within the token budget."""
+        total = estimate_messages_tokens(messages)
+        if total <= budget:
+            return messages
+
+        accumulated = 0
+        start_idx = len(messages)
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            content = msg.get("content", "")
+            msg_tokens = estimate_tokens(content) + 4 if isinstance(content, str) else 4
+            if accumulated + msg_tokens > budget:
+                start_idx = i + 1
+                break
+            accumulated += msg_tokens
+        else:
+            start_idx = 0
+
+        # Always include at least the most recent message
+        if start_idx >= len(messages) and messages:
+            return messages[-1:]
+
+        return messages[start_idx:]
 
     async def pre_session_save(self, session: Any, ctx: ExtensionContext) -> None:
         """Archive old messages when session token count exceeds threshold."""

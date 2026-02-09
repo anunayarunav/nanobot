@@ -1,12 +1,20 @@
 """Shared tool execution loop used by agent and subagent."""
 
 import json
+import re
 from typing import Any
 
 from loguru import logger
 
+_TOOL_CONTEXT_RE = re.compile(r"<tool_context>\s*[\s\S]*?</tool_context>\s*", re.DOTALL)
+
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.providers.base import LLMProvider
+
+
+def strip_tool_context(text: str) -> str:
+    """Remove any <tool_context>...</tool_context> the LLM parroted back."""
+    return _TOOL_CONTEXT_RE.sub("", text).strip()
 
 
 def summarize_tool_actions(messages: list[dict[str, Any]], start_index: int) -> str:
