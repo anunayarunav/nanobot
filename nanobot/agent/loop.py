@@ -2,6 +2,7 @@
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -10,7 +11,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
 from nanobot.agent.commands import CommandHandler
 from nanobot.agent.context import ContextBuilder
-from nanobot.agent.engine import run_tool_loop, summarize_tool_actions
+from nanobot.agent.engine import run_tool_loop
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
 from nanobot.agent.tools.shell import ExecTool
@@ -23,6 +24,35 @@ from nanobot.agent.subagent import SubagentManager
 from nanobot.extensions.base import ExtensionContext
 from nanobot.extensions.manager import ExtensionManager
 from nanobot.session.manager import SessionManager
+
+
+_TOOL_NUDGE = (
+    "[System: You have tools available (file I/O, shell, web search, etc.). "
+    "When the user's request requires reading files, running commands, searching "
+    "the web, or any action beyond pure conversation, you MUST call the "
+    "appropriate tool rather than responding with text only.]"
+)
+
+
+def _maybe_nudge_tool_use(messages: list[dict[str, Any]]) -> None:
+    """Insert a system reminder to use tools when history lacks tool_call examples.
+
+    Fires only when there are 3+ history messages (beyond system + current user)
+    and none of them carry ``tool_calls``.  This covers legacy sessions saved
+    before tool_call persistence and brand-new agents.  Once real tool_calls
+    appear in the session, this becomes a no-op.
+
+    Mutates *messages* in place — inserts before the last user message.
+    """
+    # Need meaningful history: system + at least 2 history msgs + current user
+    if len(messages) < 4:
+        return
+
+    if any(m.get("tool_calls") for m in messages if m.get("role") == "assistant"):
+        return
+
+    # Insert nudge just before the final user message
+    messages.insert(-1, {"role": "system", "content": _TOOL_NUDGE})
 
 
 class AgentLoop:
@@ -208,9 +238,11 @@ class AgentLoop:
         )
         messages = await self.extensions.transform_messages(messages, ctx)
 
-        # Tool priming — inject a real tool_call example when session history
-        # is all plain text (e.g. after process restart).
-        messages = self.context.prime_tool_usage(messages)
+        # Tool-use nudge for legacy/fresh sessions: when history has
+        # messages but none carry tool_calls, the model tends to respond
+        # text-only.  A short system reminder fixes this cheaply (~30 tokens)
+        # and self-disables once real tool_calls appear in the session.
+        _maybe_nudge_tool_use(messages)
 
         # Agent loop
         pre_loop_len = len(messages)
@@ -232,17 +264,29 @@ class AgentLoop:
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
 
-        # Save to session
+        # Save to session — persist real tool_call structures so the model
+        # sees tool usage examples after a process restart.
         session.add_message("user", msg.content)
-        tool_summary = summarize_tool_actions(messages, pre_loop_len)
-        if tool_summary:
-            session.add_message("user", f"[System: tool execution log]\n{tool_summary}")
+        for loop_msg in messages[pre_loop_len:]:
+            role = loop_msg["role"]
+            content = loop_msg.get("content", "")
+            extra: dict[str, Any] = {}
+            if loop_msg.get("tool_calls"):
+                extra["tool_calls"] = loop_msg["tool_calls"]
+            if loop_msg.get("tool_call_id"):
+                extra["tool_call_id"] = loop_msg["tool_call_id"]
+                # Truncate tool results for storage efficiency
+                if len(content) > 500:
+                    content = content[:500] + "\n...(truncated)"
+            if loop_msg.get("name") and role == "tool":
+                extra["name"] = loop_msg["name"]
+            session.add_message(role, content, **extra)
         session.add_message("assistant", final_content)
 
         # HOOK: pre_session_save
         await self.extensions.pre_session_save(session, ctx)
         self.sessions.save(session)
-        
+
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
@@ -293,8 +337,7 @@ class AgentLoop:
         )
         messages = await self.extensions.transform_messages(messages, ctx)
 
-        # Tool priming (same as _process_message)
-        messages = self.context.prime_tool_usage(messages)
+        _maybe_nudge_tool_use(messages)
 
         # Agent loop (limited for announce handling)
         pre_loop_len = len(messages)
@@ -312,11 +355,21 @@ class AgentLoop:
         # HOOK: transform_response
         final_content = await self.extensions.transform_response(final_content, ctx)
 
-        # Save to session
+        # Save to session — persist real tool_call structures
         session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
-        tool_summary = summarize_tool_actions(messages, pre_loop_len)
-        if tool_summary:
-            session.add_message("user", f"[System: tool execution log]\n{tool_summary}")
+        for loop_msg in messages[pre_loop_len:]:
+            role = loop_msg["role"]
+            content = loop_msg.get("content", "")
+            extra: dict[str, Any] = {}
+            if loop_msg.get("tool_calls"):
+                extra["tool_calls"] = loop_msg["tool_calls"]
+            if loop_msg.get("tool_call_id"):
+                extra["tool_call_id"] = loop_msg["tool_call_id"]
+                if len(content) > 500:
+                    content = content[:500] + "\n...(truncated)"
+            if loop_msg.get("name") and role == "tool":
+                extra["name"] = loop_msg["name"]
+            session.add_message(role, content, **extra)
         session.add_message("assistant", final_content)
 
         # HOOK: pre_session_save

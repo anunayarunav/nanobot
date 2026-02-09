@@ -39,10 +39,22 @@ class Session:
     def get_history(self) -> list[dict[str, Any]]:
         """Get message history for LLM context.
 
-        Returns all messages in LLM format. Token-based trimming is handled
-        by CompactionExtension.transform_history().
+        Returns all messages in LLM format, preserving tool_calls and
+        tool result fields so the model sees real tool usage examples
+        after a process restart.  Token-based trimming is handled by
+        CompactionExtension.transform_history().
         """
-        return [{"role": m["role"], "content": m["content"]} for m in self.messages]
+        result = []
+        for m in self.messages:
+            entry: dict[str, Any] = {"role": m["role"], "content": m["content"]}
+            if "tool_calls" in m:
+                entry["tool_calls"] = m["tool_calls"]
+            if "tool_call_id" in m:
+                entry["tool_call_id"] = m["tool_call_id"]
+            if "name" in m and m["role"] == "tool":
+                entry["name"] = m["name"]
+            result.append(entry)
+        return result
     
     def clear(self) -> None:
         """Clear all messages in the session."""
