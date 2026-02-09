@@ -40,21 +40,21 @@ class CompactionExtension(Extension):
     """Sole context manager: trims history to token budget and archives old messages.
 
     Config options:
-        max_tokens: int = 170000  — total token budget for the model context
-        context_headroom: int = 20000  — tokens reserved for system prompt, tools, current message
+        max_tokens: int = 40000  — total token budget for the model context
+        context_headroom: int = 10000  — tokens reserved for system prompt, tools, current message
         archive_dir: str = "sessions/archives" — relative to workspace
     """
 
     name = "compaction"
 
     def __init__(self) -> None:
-        self.max_tokens: int = 170_000
-        self.context_headroom: int = 20_000
+        self.max_tokens: int = 40_000
+        self.context_headroom: int = 10_000
         self.archive_dir: str = "sessions/archives"
 
     async def on_load(self, config: dict[str, Any]) -> None:
-        self.max_tokens = config.get("max_tokens", 170_000)
-        self.context_headroom = config.get("context_headroom", 20_000)
+        self.max_tokens = config.get("max_tokens", 40_000)
+        self.context_headroom = config.get("context_headroom", 10_000)
         self.archive_dir = config.get("archive_dir", "sessions/archives")
 
     async def transform_history(

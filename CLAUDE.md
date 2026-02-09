@@ -44,6 +44,11 @@ Actionable reference for AI assistants working on this codebase.
 4. Add to config `extensions` list: `{"classPath": "your.module.Class", "enabled": true, "options": {...}}`
 5. See `extensions/compaction.py` for a complete example
 
+### Skills
+- Two-tier discovery: **built-in** (`nanobot/skills/{name}/SKILL.md`) and **workspace** (`{workspace}/skills/{name}/SKILL.md`). Workspace skills override built-in skills of the same name.
+- `nanobot/skills/` contains skill templates/drafts that may be untracked by git (intentional). These serve as built-in skills available to all bots running the package.
+- To distribute a skill globally, add it to `nanobot/skills/`. To install per-bot, place it in the bot's workspace `skills/` directory.
+
 ### ContextAwareTool
 Tools that need per-message channel/chat_id (MessageTool, SpawnTool, CronTool) inherit `ContextAwareTool` and implement `set_context(channel, chat_id)`. The registry calls `set_context()` on all such tools before each message.
 

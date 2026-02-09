@@ -1,6 +1,7 @@
 """Context builder for assembling agent prompts."""
 
 import base64
+import json
 import mimetypes
 import platform
 from pathlib import Path
@@ -211,19 +212,86 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
     ) -> list[dict[str, Any]]:
         """
         Add an assistant message to the message list.
-        
+
         Args:
             messages: Current message list.
             content: Message content.
             tool_calls: Optional tool calls.
-        
+
         Returns:
             Updated message list.
         """
         msg: dict[str, Any] = {"role": "assistant", "content": content or ""}
-        
+
         if tool_calls:
             msg["tool_calls"] = tool_calls
-        
+
         messages.append(msg)
+        return messages
+
+    def prime_tool_usage(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Inject a tool_call + tool_response pair when history has no tool examples.
+
+        After a process restart, session history is loaded as plain text — no
+        tool_call structures survive.  The model receives tool *definitions*
+        via the API ``tools`` parameter but sees zero *examples* of tool usage
+        in the conversation, so it defaults to text-only responses.
+
+        This method injects one real ``list_dir`` call (with a live workspace
+        listing) to teach the model "you have tools and here's how to call
+        them".  Cost: ~200 tokens, fires only when needed.
+
+        The pair is inserted just before the final user message so the model
+        sees it as recent context.
+        """
+        # Only prime if there's meaningful history
+        # (system + at least 2 history messages + current user = 4+)
+        if len(messages) < 4:
+            return messages
+
+        # If any assistant message already carries tool_calls, skip
+        if any(
+            msg.get("tool_calls")
+            for msg in messages
+            if msg.get("role") == "assistant"
+        ):
+            return messages
+
+        # Build a real workspace listing
+        workspace_path = str(self.workspace.expanduser().resolve())
+        try:
+            items = []
+            for item in sorted(Path(workspace_path).iterdir()):
+                prefix = "📁 " if item.is_dir() else "📄 "
+                items.append(f"{prefix}{item.name}")
+            dir_listing = "\n".join(items[:20])
+        except Exception:
+            dir_listing = f"(workspace: {workspace_path})"
+
+        prime_assistant = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "prime_1",
+                "type": "function",
+                "function": {
+                    "name": "list_dir",
+                    "arguments": json.dumps({"path": workspace_path}),
+                },
+            }],
+        }
+        prime_result = {
+            "role": "tool",
+            "tool_call_id": "prime_1",
+            "name": "list_dir",
+            "content": dir_listing,
+        }
+
+        # Insert before the last message (the current user message)
+        messages.insert(-1, prime_assistant)
+        messages.insert(-1, prime_result)
+
         return messages

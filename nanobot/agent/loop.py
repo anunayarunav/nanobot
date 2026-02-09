@@ -208,6 +208,10 @@ class AgentLoop:
         )
         messages = await self.extensions.transform_messages(messages, ctx)
 
+        # Tool priming — inject a real tool_call example when session history
+        # is all plain text (e.g. after process restart).
+        messages = self.context.prime_tool_usage(messages)
+
         # Agent loop
         pre_loop_len = len(messages)
         final_content = await run_tool_loop(
@@ -288,6 +292,9 @@ class AgentLoop:
             chat_id=origin_chat_id,
         )
         messages = await self.extensions.transform_messages(messages, ctx)
+
+        # Tool priming (same as _process_message)
+        messages = self.context.prime_tool_usage(messages)
 
         # Agent loop (limited for announce handling)
         pre_loop_len = len(messages)
