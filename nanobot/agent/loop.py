@@ -26,6 +26,8 @@ from nanobot.extensions.manager import ExtensionManager
 from nanobot.session.manager import SessionManager
 
 
+_SLOW_TOOLS = {"exec", "web_search", "web_fetch", "spawn"}
+
 _TOOL_NUDGE = (
     "[System: You have tools available (file I/O, shell, web search, etc.). "
     "When the user's request requires reading files, running commands, searching "
@@ -148,7 +150,31 @@ class AgentLoop:
         # Cron tool (for scheduling)
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
-    
+
+    def _make_progress_callback(
+        self, channel: str, chat_id: str,
+    ) -> "Callable[[str, dict[str, Any]], Awaitable[None]]":
+        """Create a callback that sends progress messages for slow tools."""
+        from collections.abc import Callable, Awaitable
+
+        async def _notify(name: str, args: dict[str, Any]) -> None:
+            if name not in _SLOW_TOOLS:
+                return
+            if name == "exec":
+                detail = str(args.get("command", ""))[:100]
+            elif name == "web_search":
+                detail = str(args.get("query", ""))[:100]
+            elif name == "web_fetch":
+                detail = str(args.get("url", ""))[:100]
+            else:
+                detail = str(args.get("task", ""))[:100]
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=channel, chat_id=chat_id,
+                content=f"⏳ `{name}`: {detail}",
+            ))
+
+        return _notify
+
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
         self._running = True
@@ -252,6 +278,7 @@ class AgentLoop:
             messages=messages,
             model=self.model,
             max_iterations=self.max_iterations,
+            on_tool_call=self._make_progress_callback(msg.channel, msg.chat_id),
         )
 
         if not final_content:
@@ -347,6 +374,7 @@ class AgentLoop:
             messages=messages,
             model=self.model,
             max_iterations=self.max_iterations,
+            on_tool_call=self._make_progress_callback(origin_channel, origin_chat_id),
         )
 
         if not final_content:

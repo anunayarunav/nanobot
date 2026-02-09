@@ -1,6 +1,7 @@
 """Shared tool execution loop used by agent and subagent."""
 
 import json
+from collections.abc import Callable, Awaitable
 from typing import Any
 
 from loguru import logger
@@ -73,6 +74,7 @@ async def run_tool_loop(
     model: str,
     max_iterations: int = 20,
     log_prefix: str = "",
+    on_tool_call: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
 ) -> str | None:
     """Run the LLM tool-calling loop until a final text response or max iterations.
 
@@ -83,6 +85,8 @@ async def run_tool_loop(
         model: Model identifier.
         max_iterations: Safety cap on iterations.
         log_prefix: Optional prefix for log messages (e.g. "Subagent [abc123]").
+        on_tool_call: Optional async callback fired before each tool execution.
+            Receives (tool_name, arguments). Used for progress notifications.
 
     Returns:
         The final text content, or None if max_iterations hit without a text response.
@@ -135,6 +139,8 @@ async def run_tool_loop(
         for tool_call in response.tool_calls:
             args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
             logger.info(f"{prefix}Tool call: {tool_call.name}({args_str[:200]})")
+            if on_tool_call:
+                await on_tool_call(tool_call.name, tool_call.arguments)
             result = await tools.execute(tool_call.name, tool_call.arguments)
             messages.append({
                 "role": "tool",
