@@ -263,6 +263,14 @@ class AgentLoop:
         logger.info("Agent loop started")
 
         while self._running:
+            # Clean up completed processing task
+            if self._processing_task and self._processing_task.done():
+                try:
+                    self._processing_task.result()
+                except Exception:
+                    pass  # already logged in _process_and_respond
+                self._processing_task = None
+
             try:
                 msg = await asyncio.wait_for(
                     self.bus.consume_inbound(),
@@ -272,18 +280,9 @@ class AgentLoop:
                 continue
 
             try:
-                # Interrupt commands (/stop) take effect immediately
-                if self.command_registry.is_interrupt(msg.content):
-                    response = await self._dispatch_command(msg)
-                    if response:
-                        await self.bus.publish_outbound(response)
-                    continue
-
-                # Non-interrupt commands dispatch inline
-                if self.command_registry.is_command(msg.content):
-                    # Wait for any running processing to finish first
-                    if self._processing_task and not self._processing_task.done():
-                        await self._processing_task
+                # Commands (interrupt or not) dispatch immediately — never block
+                if self.command_registry.is_interrupt(msg.content) or \
+                   self.command_registry.is_command(msg.content):
                     response = await self._dispatch_command(msg)
                     if response:
                         await self.bus.publish_outbound(response)
@@ -292,6 +291,7 @@ class AgentLoop:
                 # Regular message — wait for previous processing, then start new task
                 if self._processing_task and not self._processing_task.done():
                     await self._processing_task
+                    self._processing_task = None
 
                 cancel_event = asyncio.Event()
                 self.cancel_events[msg.session_key] = cancel_event
