@@ -281,6 +281,35 @@ If the `commands` key doesn't exist yet in the config, add it at the top level:
 }
 ```
 
+### Configure Terminal Mode
+
+Enable terminal mode to bypass the LLM entirely. Messages are executed as shell commands
+using a configurable template. The `{message}` placeholder is replaced with the user's
+shell-escaped text at runtime.
+
+1. Read config: `cat /home/deploy/bots/{project}/.nanobot/config.json`
+2. Backup: `cp /home/deploy/bots/{project}/.nanobot/config.json /home/deploy/bots/{project}/.nanobot/config.json.bak`
+3. Use edit_file to add/modify the `terminal` section at the top level:
+   ```json
+   {
+     "terminal": {
+       "enabled": true,
+       "command": "timeout 300 artisan chat --project 'project-name' -m {message} -v",
+       "timeout": 310
+     }
+   }
+   ```
+   - `enabled`: true to activate, false to go back to normal AI mode
+   - `command`: shell command template — `{message}` is replaced with the user's text (shell-escaped)
+   - `timeout`: subprocess timeout in seconds (should be >= any timeout in the command itself)
+4. Restart: `sudo systemctl restart nanobot@{project}`
+5. Log:
+   ```bash
+   echo "$(date -Iseconds) CONFIG project={project} terminal.enabled={value}" >> /home/deploy/bots/audit.log
+   ```
+
+To disable terminal mode: set `"enabled": false` and restart. The bot will return to normal AI mode.
+
 ### Update a Project's Instructions
 
 Use write_file to update:

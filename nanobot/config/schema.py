@@ -136,6 +136,17 @@ class CommandsConfig(BaseModel):
     allowed: list[str] = Field(default_factory=lambda: ["model", "help"])
 
 
+class TerminalConfig(BaseModel):
+    """Terminal mode: bypass LLM and execute messages as shell commands.
+
+    The ``command`` template must contain a ``{message}`` placeholder which
+    is replaced with the shell-escaped user text at runtime.
+    """
+    enabled: bool = False
+    command: str = ""       # e.g. "artisan chat -m {message} -v"
+    timeout: int = 120      # Subprocess timeout in seconds
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
@@ -145,6 +156,7 @@ class Config(BaseSettings):
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     extensions: list[ExtensionConfig] = Field(default_factory=list)
     commands: CommandsConfig = Field(default_factory=CommandsConfig)
+    terminal: TerminalConfig = Field(default_factory=TerminalConfig)
     
     @property
     def workspace_path(self) -> Path:

@@ -316,7 +316,10 @@ class AgentLoop:
     ) -> None:
         """Process a message and publish the response. Wraps _process_message for task use."""
         try:
-            response = await self._process_message(msg, cancel_event)
+            if self.config and self.config.terminal.enabled:
+                response = await self._process_terminal_message(msg)
+            else:
+                response = await self._process_message(msg, cancel_event)
             if response:
                 await self.bus.publish_outbound(response)
         except Exception as e:
@@ -328,6 +331,30 @@ class AgentLoop:
             ))
         finally:
             self.cancel_events.pop(msg.session_key, None)
+
+    async def _process_terminal_message(self, msg: InboundMessage) -> OutboundMessage | None:
+        """Execute a message as a shell command in terminal mode (no LLM)."""
+        from nanobot.agent.terminal import execute_terminal_command
+
+        terminal_cfg = self.config.terminal
+        command_preview = terminal_cfg.command.replace(
+            "{message}", msg.content[:60] + "..." if len(msg.content) > 60 else msg.content,
+        )
+        preview = command_preview[:120] + "..." if len(command_preview) > 120 else command_preview
+
+        # Progress notification so the user sees what's running
+        await self.bus.publish_outbound(OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=f"⏳ `{preview}`",
+        ))
+
+        return await execute_terminal_command(
+            msg=msg,
+            template=terminal_cfg.command,
+            workspace=str(self.workspace),
+            timeout=terminal_cfg.timeout,
+        )
 
     async def _process_message(
         self, msg: InboundMessage, cancel_event: asyncio.Event | None = None,
@@ -546,6 +573,11 @@ class AgentLoop:
         # Handle commands from CLI too
         if self.command_registry.is_command(content):
             response = await self._dispatch_command(msg)
+            return response.content if response else ""
+
+        # Terminal mode bypass
+        if self.config and self.config.terminal.enabled:
+            response = await self._process_terminal_message(msg)
             return response.content if response else ""
 
         response = await self._process_message(msg)
