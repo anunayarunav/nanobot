@@ -142,11 +142,43 @@ def _build_command(template: str, msg: InboundMessage) -> str:
     return command
 
 
+_PROVIDER_ENV_MAP: dict[str, str] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "google": "GOOGLE_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "replicate": "REPLICATE_API_TOKEN",
+    "mistral": "MISTRAL_API_KEY",
+    "cohere": "COHERE_API_KEY",
+}
+
+
 def _build_env(config: TerminalConfig) -> dict[str, str] | None:
-    """Build the subprocess environment, merging extra vars if configured."""
-    if not config.env:
+    """Build the subprocess environment.
+
+    Merges static ``config.env`` vars and injects provider API keys as
+    standard environment variables (e.g. ``ANTHROPIC_API_KEY``) so that
+    SDKs like litellm, openai, google-genai work out of the box.
+
+    When a provider has multiple keys, the first is set as the standard
+    env var and all are available as ``{NAME}_API_KEYS`` (comma-separated).
+    """
+    has_extras = bool(config.env) or bool(config.providers)
+    if not has_extras:
         return None  # inherit parent environment
     env = dict(os.environ)
+    # Inject provider API keys as env vars
+    for name, provider in config.providers.items():
+        if not provider.api_keys:
+            continue
+        env_var = _PROVIDER_ENV_MAP.get(name)
+        if env_var:
+            env[env_var] = provider.api_keys[0]
+        # Always set {NAME}_API_KEYS with all keys (comma-separated)
+        env[f"{name.upper()}_API_KEYS"] = ",".join(provider.api_keys)
+    # Static env vars from config (override provider defaults if set)
     env.update(config.env)
     return env
 
