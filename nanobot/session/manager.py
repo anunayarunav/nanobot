@@ -1,6 +1,8 @@
 """Session management for conversation history."""
 
 import json
+import os
+import tempfile
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -138,23 +140,33 @@ class SessionManager:
             return None
     
     def save(self, session: Session) -> None:
-        """Save a session to disk."""
+        """Save a session to disk (atomic write via temp file + rename)."""
         path = self._get_session_path(session.key)
-        
-        with open(path, "w") as f:
-            # Write metadata first
-            metadata_line = {
-                "_type": "metadata",
-                "created_at": session.created_at.isoformat(),
-                "updated_at": session.updated_at.isoformat(),
-                "metadata": session.metadata
-            }
-            f.write(json.dumps(metadata_line) + "\n")
-            
-            # Write messages
-            for msg in session.messages:
-                f.write(json.dumps(msg) + "\n")
-        
+
+        fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                # Write metadata first
+                metadata_line = {
+                    "_type": "metadata",
+                    "created_at": session.created_at.isoformat(),
+                    "updated_at": session.updated_at.isoformat(),
+                    "metadata": session.metadata
+                }
+                f.write(json.dumps(metadata_line) + "\n")
+
+                # Write messages
+                for msg in session.messages:
+                    f.write(json.dumps(msg) + "\n")
+            os.replace(tmp_path, path)
+        except BaseException:
+            # Clean up temp file on any failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
         self._cache[session.key] = session
     
     def delete(self, key: str) -> bool:
@@ -200,7 +212,8 @@ class SessionManager:
                                 "updated_at": data.get("updated_at"),
                                 "path": str(path)
                             })
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Failed to read session {path.name}: {e}")
                 continue
         
         return sorted(sessions, key=lambda x: x.get("updated_at", ""), reverse=True)

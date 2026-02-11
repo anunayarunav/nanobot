@@ -79,8 +79,12 @@ class SubagentManager:
         )
         self._running_tasks[task_id] = bg_task
         
-        # Cleanup when done
-        bg_task.add_done_callback(lambda _: self._running_tasks.pop(task_id, None))
+        # Cleanup when done, log unhandled exceptions
+        def _on_done(t: asyncio.Task, _tid: str = task_id) -> None:
+            self._running_tasks.pop(_tid, None)
+            if not t.cancelled() and t.exception():
+                logger.error(f"Subagent [{_tid}] unhandled error: {t.exception()}")
+        bg_task.add_done_callback(_on_done)
         
         logger.info(f"Spawned subagent [{task_id}]: {display_label}")
         return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."

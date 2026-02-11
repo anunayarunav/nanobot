@@ -3,7 +3,8 @@
 *.pyc
 dist/
 build/
-docs/
+docs/*
+!docs/TERMINAL_PROTOCOL.md
 *.egg-info/
 *.egg
 *.pyc

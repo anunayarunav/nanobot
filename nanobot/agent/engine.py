@@ -170,7 +170,11 @@ async def run_tool_loop(
                 logger.info(f"{prefix}Tool loop cancelled before executing {tool_call.name}")
                 return "[Operation cancelled by user]"
 
-            args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+            safe_args = {
+                k: ("***" if any(s in k.lower() for s in ("key", "token", "secret", "password")) else v)
+                for k, v in tool_call.arguments.items()
+            }
+            args_str = json.dumps(safe_args, ensure_ascii=False)
             logger.info(f"{prefix}Tool call: {tool_call.name}({args_str[:200]})")
             if on_tool_call:
                 await on_tool_call(tool_call.name, tool_call.arguments)

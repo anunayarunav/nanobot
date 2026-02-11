@@ -84,6 +84,7 @@ class ExecTool(Tool):
                 )
             except asyncio.TimeoutError:
                 process.kill()
+                await process.wait()
                 return f"Error: Command timed out after {self.timeout} seconds"
             
             output_parts = []
@@ -179,7 +180,7 @@ class ExecTool(Tool):
             return False
 
         # Normalize: strip scheme and user prefix, unify separators
-        normalized = re.sub(r"^[a-z+]+://", "", url)  # https://, git+ssh://
+        normalized = re.sub(r"^[a-z+]+://", "", url, flags=re.IGNORECASE)  # https://, git+ssh://, HTTP://
         normalized = re.sub(r"^[^@]+@", "", normalized)  # git@github.com:...
         normalized = normalized.replace(":", "/", 1)  # github.com:user/repo
         normalized = normalized.rstrip("/")

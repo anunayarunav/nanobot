@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 import typer
+from loguru import logger
 from rich.console import Console
 from rich.table import Table
 
@@ -185,8 +186,9 @@ def gateway(
     from nanobot.heartbeat.service import HeartbeatService
     
     if verbose:
-        import logging
-        logging.basicConfig(level=logging.DEBUG)
+        import sys
+        logger.remove()
+        logger.add(sys.stderr, level="DEBUG")
     
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
     

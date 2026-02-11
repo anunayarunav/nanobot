@@ -1,6 +1,8 @@
 """Configuration loading utilities."""
 
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -58,8 +60,21 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
     data = config.model_dump()
     data = convert_to_camel(data)
     
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    fd, tmp_path = None, None
+    try:
+        fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        fd = None  # fd closed by os.fdopen
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, path)
+    except BaseException:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
 
 
 def _migrate_config(data: dict) -> dict:

@@ -122,7 +122,8 @@ class AgentLoop:
         self.extensions = extensions or ExtensionManager()
 
         self._running = False
-        self._processing_task: asyncio.Task[None] | None = None
+        # Per-session processing tasks — allows concurrent users
+        self._processing_tasks: dict[str, asyncio.Task[None]] = {}
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -256,20 +257,25 @@ class AgentLoop:
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus.
 
-        Messages are processed as asyncio tasks so that interrupt commands
-        (/stop) can be handled while a tool loop is running.
+        Messages are processed as concurrent asyncio tasks keyed by
+        session.  Different users run in parallel; messages from the
+        *same* user are serialised so that conversation history stays
+        consistent.
         """
         self._running = True
         logger.info("Agent loop started")
 
         while self._running:
-            # Clean up completed processing task
-            if self._processing_task and self._processing_task.done():
+            # Reap finished tasks
+            done_keys = [
+                k for k, t in self._processing_tasks.items() if t.done()
+            ]
+            for k in done_keys:
                 try:
-                    self._processing_task.result()
+                    self._processing_tasks[k].result()
                 except Exception:
                     pass  # already logged in _process_and_respond
-                self._processing_task = None
+                del self._processing_tasks[k]
 
             try:
                 msg = await asyncio.wait_for(
@@ -280,7 +286,7 @@ class AgentLoop:
                 continue
 
             try:
-                # Commands (interrupt or not) dispatch immediately — never block
+                # Commands dispatch immediately — never block
                 if self.command_registry.is_interrupt(msg.content) or \
                    self.command_registry.is_command(msg.content):
                     response = await self._dispatch_command(msg)
@@ -288,14 +294,18 @@ class AgentLoop:
                         await self.bus.publish_outbound(response)
                     continue
 
-                # Regular message — wait for previous processing, then start new task
-                if self._processing_task and not self._processing_task.done():
-                    await self._processing_task
-                    self._processing_task = None
+                sk = msg.session_key
+
+                # Serialise within the same session (same user) so
+                # conversation history stays consistent
+                existing = self._processing_tasks.get(sk)
+                if existing and not existing.done():
+                    await existing
+                    self._processing_tasks.pop(sk, None)
 
                 cancel_event = asyncio.Event()
-                self.cancel_events[msg.session_key] = cancel_event
-                self._processing_task = asyncio.create_task(
+                self.cancel_events[sk] = cancel_event
+                self._processing_tasks[sk] = asyncio.create_task(
                     self._process_and_respond(msg, cancel_event)
                 )
             except Exception as e:
@@ -334,7 +344,7 @@ class AgentLoop:
 
     async def _process_terminal_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """Execute a message as a shell command in terminal mode (no LLM)."""
-        from nanobot.agent.terminal import execute_terminal_command
+        from nanobot.agent.terminal import run_terminal_command
 
         terminal_cfg = self.config.terminal
         command_preview = terminal_cfg.command.replace(
@@ -349,11 +359,11 @@ class AgentLoop:
             content=f"⏳ `{preview}`",
         ))
 
-        return await execute_terminal_command(
+        return await run_terminal_command(
             msg=msg,
-            template=terminal_cfg.command,
+            config=terminal_cfg,
             workspace=str(self.workspace),
-            timeout=terminal_cfg.timeout,
+            publish=self.bus.publish_outbound,
         )
 
     async def _process_message(

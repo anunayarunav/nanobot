@@ -66,21 +66,33 @@ class ExtensionManager:
         self, history: list[dict[str, Any]], session: Any, ctx: ExtensionContext
     ) -> list[dict[str, Any]]:
         for ext in self._extensions:
-            history = await ext.transform_history(history, session, ctx)
+            try:
+                history = await ext.transform_history(history, session, ctx)
+            except Exception as e:
+                logger.error(f"Extension {ext.name} failed in transform_history: {e}")
         return history
 
     async def transform_messages(
         self, messages: list[dict[str, Any]], ctx: ExtensionContext
     ) -> list[dict[str, Any]]:
         for ext in self._extensions:
-            messages = await ext.transform_messages(messages, ctx)
+            try:
+                messages = await ext.transform_messages(messages, ctx)
+            except Exception as e:
+                logger.error(f"Extension {ext.name} failed in transform_messages: {e}")
         return messages
 
     async def transform_response(self, content: str, ctx: ExtensionContext) -> str:
         for ext in self._extensions:
-            content = await ext.transform_response(content, ctx)
+            try:
+                content = await ext.transform_response(content, ctx)
+            except Exception as e:
+                logger.error(f"Extension {ext.name} failed in transform_response: {e}")
         return content
 
     async def pre_session_save(self, session: Any, ctx: ExtensionContext) -> None:
         for ext in self._extensions:
-            await ext.pre_session_save(session, ctx)
+            try:
+                await ext.pre_session_save(session, ctx)
+            except Exception as e:
+                logger.error(f"Extension {ext.name} failed in pre_session_save: {e}")

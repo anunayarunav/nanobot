@@ -57,6 +57,7 @@ Tools that need per-message channel/chat_id (MessageTool, SpawnTool, CronTool) i
 | File | What it does |
 |------|-------------|
 | `agent/loop.py` | Core agent loop, message processing, /model command |
+| `agent/terminal.py` | Terminal protocol engine — plain + rich (JSONL) modes |
 | `agent/context.py` | System prompt assembly from bootstrap files + memory + skills |
 | `agent/engine.py` | Shared tool execution loop (used by agent + subagent) |
 | `agent/commands.py` | Slash command handling (/model, future commands) |
@@ -76,6 +77,17 @@ Tools that need per-message channel/chat_id (MessageTool, SpawnTool, CronTool) i
 | `session/manager.py` | JSONL conversation persistence |
 | `channels/base.py` | `BaseChannel` ABC with ACL (`is_allowed()`) |
 | `bus/queue.py` | Async message bus (inbound + outbound queues) |
+| `docs/TERMINAL_PROTOCOL.md` | Terminal protocol spec — **the contract for micro-agents** |
+
+## Terminal Protocol
+
+Terminal mode bypasses the LLM and runs a subprocess as a micro-agent. The protocol has two modes:
+- **plain** (`protocol: "plain"`): original behavior — wait for exit, regex-scan stdout for media paths.
+- **rich** (`protocol: "rich"`): JSONL streaming — subprocess emits `message`, `progress`, `error`, `log` frames on stdout.
+
+Both modes receive a JSON input envelope on stdin with the user's text, media paths, channel, and workspace.
+
+**IMPORTANT**: The full protocol specification lives in `docs/TERMINAL_PROTOCOL.md`. This is the contract that external micro-agents implement. If you modify `agent/terminal.py` (frame types, envelope fields, config fields, parsing behavior), you **MUST** update `docs/TERMINAL_PROTOCOL.md` to match. The doc is the source of truth that other developers and AI agents use to build micro-agents.
 
 ## Gotchas
 

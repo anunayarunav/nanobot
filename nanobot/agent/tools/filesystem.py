@@ -6,11 +6,15 @@ from typing import Any
 from nanobot.agent.tools.base import Tool
 
 
+class _PathRestrictionError(Exception):
+    """Path is outside the allowed directory."""
+
+
 def _resolve_path(path: str, allowed_dir: Path | None = None) -> Path:
     """Resolve path and optionally enforce directory restriction."""
     resolved = Path(path).expanduser().resolve()
     if allowed_dir and not str(resolved).startswith(str(allowed_dir.resolve())):
-        raise PermissionError(f"Path {path} is outside allowed directory {allowed_dir}")
+        raise _PathRestrictionError(f"Path {path} is outside allowed directory {allowed_dir}")
     return resolved
 
 
@@ -51,7 +55,7 @@ class ReadFileTool(Tool):
             
             content = file_path.read_text(encoding="utf-8")
             return content
-        except PermissionError as e:
+        except _PathRestrictionError as e:
             return f"Error: {e}"
         except Exception as e:
             return f"Error reading file: {str(e)}"
@@ -94,7 +98,7 @@ class WriteFileTool(Tool):
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content, encoding="utf-8")
             return f"Successfully wrote {len(content)} bytes to {path}"
-        except PermissionError as e:
+        except _PathRestrictionError as e:
             return f"Error: {e}"
         except Exception as e:
             return f"Error writing file: {str(e)}"
@@ -155,7 +159,7 @@ class EditFileTool(Tool):
             file_path.write_text(new_content, encoding="utf-8")
             
             return f"Successfully edited {path}"
-        except PermissionError as e:
+        except _PathRestrictionError as e:
             return f"Error: {e}"
         except Exception as e:
             return f"Error editing file: {str(e)}"
@@ -205,7 +209,7 @@ class ListDirTool(Tool):
                 return f"Directory {path} is empty"
             
             return "\n".join(items)
-        except PermissionError as e:
+        except _PathRestrictionError as e:
             return f"Error: {e}"
         except Exception as e:
             return f"Error listing directory: {str(e)}"

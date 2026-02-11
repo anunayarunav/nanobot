@@ -136,15 +136,40 @@ class CommandsConfig(BaseModel):
     allowed: list[str] = Field(default_factory=lambda: ["model", "help"])
 
 
+class TerminalProviderConfig(BaseModel):
+    """A provider available to terminal micro-agents.
+
+    Supports multiple API keys for rotation (micro-agent picks one).
+    """
+    api_keys: list[str] = Field(default_factory=list)
+    models: list[str] = Field(default_factory=list)  # available model IDs
+    base_url: str | None = None
+
+
 class TerminalConfig(BaseModel):
     """Terminal mode: bypass LLM and execute messages as shell commands.
 
-    The ``command`` template must contain a ``{message}`` placeholder which
-    is replaced with the shell-escaped user text at runtime.
+    The ``command`` template may contain a ``{message}`` placeholder which
+    is replaced with the shell-escaped user text at runtime.  A JSON
+    envelope is always written to the subprocess's stdin regardless of
+    the protocol setting.
+
+    Protocol modes:
+      - ``plain`` (default): wait for exit, capture stdout, regex-scan
+        for media file paths.  Backward-compatible with the original
+        behaviour.
+      - ``rich``: read stdout line-by-line as JSONL frames.  Each frame
+        has a ``type`` field (``message``, ``progress``, ``error``,
+        ``log``).  Enables real-time progress, multiple messages, and
+        structured media output.
     """
     enabled: bool = False
-    command: str = ""       # e.g. "artisan chat -m {message} -v"
-    timeout: int = 120      # Subprocess timeout in seconds
+    command: str = ""               # e.g. "artisan chat -m {message} -v"
+    timeout: int = 120              # Subprocess timeout in seconds
+    protocol: str = "plain"         # "plain" | "rich"
+    pass_media: bool = True         # include user media paths in stdin JSON
+    env: dict[str, str] = Field(default_factory=dict)  # extra env vars
+    providers: dict[str, TerminalProviderConfig] = Field(default_factory=dict)
 
 
 class Config(BaseSettings):

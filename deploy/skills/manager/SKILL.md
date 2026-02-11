@@ -281,11 +281,73 @@ If the `commands` key doesn't exist yet in the config, add it at the top level:
 }
 ```
 
-### Configure Terminal Mode
+### Create a Terminal Micro-Agent
 
-Enable terminal mode to bypass the LLM entirely. Messages are executed as shell commands
-using a configurable template. The `{message}` placeholder is replaced with the user's
-shell-escaped text at runtime.
+Terminal micro-agents bypass the LLM pipeline entirely. Nanobot runs a subprocess for each
+user message, communicating via the **Terminal Protocol v1** (stdin JSON envelope, stdout
+JSONL frames). See `docs/TERMINAL_PROTOCOL.md` for the full protocol spec.
+
+When the user asks to create a terminal bot, you need:
+- **Project name** (lowercase, alphanumeric + hyphens)
+- **Telegram bot token** (from @BotFather)
+- **Command** — the shell command to run (e.g., `python /home/deploy/agents/jp-sensei/sensei.py`)
+- Optionally: extra env vars the micro-agent needs (API keys, etc.)
+
+Steps:
+
+1. **Validate** the project name:
+   ```bash
+   [ -d "/home/deploy/bots/{name}" ] && echo "EXISTS" || echo "OK"
+   ```
+
+2. **Allocate a port**:
+   ```bash
+   /home/deploy/bots/master/.nanobot/workspace/skills/manager/scripts/next-port.sh
+   ```
+
+3. **Create the project** with the terminal command:
+   ```bash
+   /home/deploy/bots/master/.nanobot/workspace/skills/manager/scripts/create-project.sh \
+     "{name}" "{telegram_token}" "{port}" "{owner_telegram_id}" "{terminal_command}"
+   ```
+   The 5th argument activates terminal mode. The script generates a config with
+   `terminal.enabled: true`, `protocol: "rich"`, and `passMedia: true`.
+
+4. **Set env vars** the micro-agent needs (API keys, etc.) in the systemd override:
+   ```bash
+   sudo mkdir -p /etc/systemd/system/nanobot@{name}.service.d/
+   ```
+   Write an override.conf:
+   ```ini
+   [Service]
+   Environment=ANTHROPIC_API_KEY={key}
+   Environment=OTHER_VAR={value}
+   ```
+
+5. **Start the service**:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now "nanobot@{name}"
+   ```
+
+6. **Log**:
+   ```bash
+   echo "$(date -Iseconds) CREATE project={name} mode=terminal owner={owner_id}" >> /home/deploy/bots/audit.log
+   ```
+
+7. **Verify**:
+   ```bash
+   sleep 2
+   sudo systemctl is-active "nanobot@{name}"
+   ```
+
+The micro-agent receives a JSON envelope on stdin with user text, media paths,
+`user_data_dir` (per-user persistent storage), and session metadata. It emits JSONL
+frames on stdout: `message`, `progress`, `error`, `log`.
+
+### Configure Terminal Mode (Existing Project)
+
+Enable terminal mode on an existing LLM project, or modify terminal settings.
 
 1. Read config: `cat /home/deploy/bots/{project}/.nanobot/config.json`
 2. Backup: `cp /home/deploy/bots/{project}/.nanobot/config.json /home/deploy/bots/{project}/.nanobot/config.json.bak`
@@ -294,14 +356,22 @@ shell-escaped text at runtime.
    {
      "terminal": {
        "enabled": true,
-       "command": "timeout 300 artisan chat --project 'project-name' -m {message} -v",
-       "timeout": 310
+       "command": "python /home/deploy/agents/my-agent/main.py",
+       "protocol": "rich",
+       "passMedia": true,
+       "timeout": 120,
+       "env": {
+         "CUSTOM_VAR": "value"
+       }
      }
    }
    ```
    - `enabled`: true to activate, false to go back to normal AI mode
-   - `command`: shell command template — `{message}` is replaced with the user's text (shell-escaped)
-   - `timeout`: subprocess timeout in seconds (should be >= any timeout in the command itself)
+   - `command`: shell command to execute for each message
+   - `protocol`: `"rich"` (JSONL frames) or `"plain"` (raw stdout capture)
+   - `passMedia`: include user's media file paths in stdin JSON
+   - `timeout`: subprocess timeout in seconds
+   - `env`: extra environment variables merged into the subprocess
 4. Restart: `sudo systemctl restart nanobot@{project}`
 5. Log:
    ```bash
@@ -309,6 +379,52 @@ shell-escaped text at runtime.
    ```
 
 To disable terminal mode: set `"enabled": false` and restart. The bot will return to normal AI mode.
+
+### Configure Providers for a Terminal Bot
+
+Terminal micro-agents receive LLM/API provider credentials in the stdin envelope. Providers are
+configured in `terminal.providers` in the bot's config.json. Multiple API keys per provider
+enable key rotation (the micro-agent picks one per request).
+
+1. Read config: `cat /home/deploy/bots/{project}/.nanobot/config.json`
+2. Backup: `cp /home/deploy/bots/{project}/.nanobot/config.json /home/deploy/bots/{project}/.nanobot/config.json.bak`
+3. Use edit_file to add/modify the `terminal.providers` section:
+   ```json
+   {
+     "terminal": {
+       "providers": {
+         "anthropic": {
+           "apiKeys": ["sk-ant-key1"],
+           "models": ["claude-sonnet-4-5-20250929", "claude-haiku-4-5-20251001"]
+         },
+         "replicate": {
+           "apiKeys": ["r8_key1", "r8_key2", "r8_key3"],
+           "baseUrl": "https://api.replicate.com/v1"
+         },
+         "openai": {
+           "apiKeys": ["sk-openai-key"],
+           "models": ["gpt-4o", "gpt-4o-mini"]
+         }
+       }
+     }
+   }
+   ```
+   Each provider entry:
+   - `apiKeys`: **required** — list of API keys (multiple for rotation)
+   - `models`: optional — model IDs available from this provider
+   - `baseUrl`: optional — custom API endpoint
+
+4. Restart: `sudo systemctl restart nanobot@{project}`
+5. Log:
+   ```bash
+   echo "$(date -Iseconds) CONFIG project={project} terminal.providers updated" >> /home/deploy/bots/audit.log
+   ```
+
+To **add a key** to an existing provider, append to the `apiKeys` array.
+To **remove a provider**, delete its entry from the `providers` object.
+
+**Security note**: API keys live in the per-bot config.json on the server. They are passed to the
+micro-agent via stdin (not environment variables). Never put keys in micro-agent source code.
 
 ### Update a Project's Instructions
 

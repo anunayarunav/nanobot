@@ -84,6 +84,11 @@ class AnthropicOAuthProvider(LLMProvider):
 
         except asyncio.TimeoutError:
             logger.error("Claude CLI timed out after 600s")
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
             return LLMResponse(content="Claude CLI timed out", finish_reason="error")
         except FileNotFoundError:
             logger.error(f"Claude CLI not found at: {self.claude_bin}")

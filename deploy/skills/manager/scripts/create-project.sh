@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # create-project.sh — Create a new nanobot worker project
-# Usage: create-project.sh <name> <telegram_token> <port> <owner_telegram_id>
+# Usage: create-project.sh <name> <telegram_token> <port> <owner_telegram_id> [terminal_command]
+#
+# If terminal_command is provided, the project is created in terminal mode
+# (rich JSONL protocol, LLM pipeline bypassed). The command is the shell
+# command that nanobot will execute for each user message.
 
 set -euo pipefail
 
-NAME="${1:?Usage: create-project.sh <name> <telegram_token> <port> <owner_id>}"
+NAME="${1:?Usage: create-project.sh <name> <telegram_token> <port> <owner_id> [terminal_command]}"
 TOKEN="${2:?Missing telegram bot token}"
 PORT="${3:?Missing port number}"
 OWNER_ID="${4:?Missing owner telegram ID}"
+TERMINAL_CMD="${5:-}"
 
 BOTS_DIR="/home/deploy/bots"
 PROJECT_DIR="${BOTS_DIR}/${NAME}"
@@ -37,8 +42,36 @@ mkdir -p "${WORKSPACE_DIR}/memory"
 mkdir -p "${WORKSPACE_DIR}/skills"
 mkdir -p "${NANOBOT_DIR}/sessions"
 
-# Write config.json
-cat > "${NANOBOT_DIR}/config.json" << JSONEOF
+# Write config.json — terminal mode or LLM mode
+if [ -n "$TERMINAL_CMD" ]; then
+  echo "Mode: terminal (rich protocol)"
+  cat > "${NANOBOT_DIR}/config.json" << JSONEOF
+{
+  "terminal": {
+    "enabled": true,
+    "command": "${TERMINAL_CMD}",
+    "protocol": "rich",
+    "passMedia": true,
+    "timeout": 120
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "token": "${TOKEN}",
+      "allowFrom": ["${OWNER_ID}"]
+    }
+  },
+  "gateway": {
+    "port": ${PORT}
+  },
+  "commands": {
+    "allowed": ["help"]
+  }
+}
+JSONEOF
+else
+  echo "Mode: LLM agent"
+  cat > "${NANOBOT_DIR}/config.json" << JSONEOF
 {
   "agents": {
     "defaults": {
@@ -69,6 +102,7 @@ cat > "${NANOBOT_DIR}/config.json" << JSONEOF
   "extensions": []
 }
 JSONEOF
+fi
 
 # Write default AGENTS.md
 cat > "${WORKSPACE_DIR}/AGENTS.md" << 'MDEOF'
@@ -121,7 +155,13 @@ MDEOF
 echo "${NAME}:${PORT}" >> "${BOTS_DIR}/ports.txt"
 
 # Log
-echo "$(date -Iseconds) CREATE project=${NAME} port=${PORT} owner=${OWNER_ID}" >> "${BOTS_DIR}/audit.log"
+MODE_LABEL="llm"
+[ -n "$TERMINAL_CMD" ] && MODE_LABEL="terminal"
+echo "$(date -Iseconds) CREATE project=${NAME} port=${PORT} owner=${OWNER_ID} mode=${MODE_LABEL}" >> "${BOTS_DIR}/audit.log"
 
-echo "OK: Project '${NAME}' created at ${PROJECT_DIR}"
-echo "Next: Set API key in systemd override, then start with: sudo systemctl enable --now nanobot@${NAME}"
+echo "OK: Project '${NAME}' created at ${PROJECT_DIR} (mode: ${MODE_LABEL})"
+if [ -n "$TERMINAL_CMD" ]; then
+  echo "Next: Set env vars in systemd override if needed, then start with: sudo systemctl enable --now nanobot@${NAME}"
+else
+  echo "Next: Set API key in systemd override, then start with: sudo systemctl enable --now nanobot@${NAME}"
+fi
