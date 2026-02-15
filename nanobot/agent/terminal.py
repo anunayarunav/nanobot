@@ -394,6 +394,10 @@ async def _execute_terminal_rich(
     if timed_out:
         process.kill()
         await process.wait()
+        logger.warning(
+            f"Terminal process [{msg.session_key}] killed after {config.timeout}s timeout"
+            f" (exit code {process.returncode})"
+        )
         timeout_msg = OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id,
             content=f"Command timed out after {config.timeout}s",
@@ -407,6 +411,16 @@ async def _execute_terminal_rich(
     stderr_bytes = await process.stderr.read()
     await process.wait()
     stderr = stderr_bytes.decode("utf-8", errors="replace").strip() if stderr_bytes else ""
+
+    # Always log exit code for diagnostics (especially OOM/SIGKILL = -9)
+    rc = process.returncode
+    if rc and rc != 0:
+        logger.warning(
+            f"Terminal process [{msg.session_key}] exited with code {rc}"
+            + (f" (signal {-rc})" if rc < 0 else "")
+        )
+    else:
+        logger.info(f"Terminal process [{msg.session_key}] exited with code {rc}")
 
     # If we got accumulated plain text but no structured message, fall back
     if accumulated_text and final_message is None:

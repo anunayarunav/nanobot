@@ -338,15 +338,8 @@ class TelegramChannel(BaseChannel):
         return False
     
     async def _on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /start command."""
-        if not update.message or not update.effective_user:
-            return
-        
-        user = update.effective_user
-        await update.message.reply_text(
-            f"👋 Hi {user.first_name}! I'm nanobot.\n\n"
-            "Send me a message and I'll respond!"
-        )
+        """Handle /start command — forward to the bot as a regular message."""
+        await self._on_message(update, context)
     
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming messages (text, photos, voice, documents)."""
