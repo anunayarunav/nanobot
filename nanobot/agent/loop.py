@@ -217,6 +217,31 @@ class AgentLoop:
 
         return _notify
 
+    def _set_provider_progress(
+        self, channel: str, chat_id: str, session_key: str,
+    ) -> None:
+        """Set streaming progress callback on the provider (OAuth CLI only)."""
+        from nanobot.providers.anthropic_oauth import AnthropicOAuthProvider
+        if not isinstance(self.provider, AnthropicOAuthProvider):
+            return
+
+        level = self.debug_levels.get(session_key, "moderate")
+        if level == "none":
+            self.provider.progress_callback = None
+            return
+
+        async def _on_progress(text: str) -> None:
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=channel, chat_id=chat_id, content=text,
+            ))
+
+        self.provider.progress_callback = _on_progress
+
+    def _clear_provider_progress(self) -> None:
+        """Clear the provider's progress callback after processing."""
+        if hasattr(self.provider, "progress_callback"):
+            self.provider.progress_callback = None
+
     async def _dispatch_command(self, msg: InboundMessage) -> OutboundMessage | None:
         """Dispatch a slash command and handle side-effects."""
         ctx = CommandContext(
@@ -413,17 +438,23 @@ class AgentLoop:
 
         _maybe_nudge_tool_use(messages)
 
+        # Set streaming progress callback on provider (OAuth CLI only)
+        self._set_provider_progress(msg.channel, msg.chat_id, msg.session_key)
+
         # Agent loop
         pre_loop_len = len(messages)
-        final_content = await run_tool_loop(
-            provider=self.provider,
-            tools=self.tools,
-            messages=messages,
-            model=self.model,
-            max_iterations=self.max_iterations,
-            on_tool_call=self._make_progress_callback(msg.channel, msg.chat_id, msg.session_key),
-            cancel_event=cancel_event,
-        )
+        try:
+            final_content = await run_tool_loop(
+                provider=self.provider,
+                tools=self.tools,
+                messages=messages,
+                model=self.model,
+                max_iterations=self.max_iterations,
+                on_tool_call=self._make_progress_callback(msg.channel, msg.chat_id, msg.session_key),
+                cancel_event=cancel_event,
+            )
+        finally:
+            self._clear_provider_progress()
 
         if not final_content:
             final_content = "I processed your request but wasn't able to generate a text response. Could you try rephrasing or asking again?"
@@ -510,16 +541,22 @@ class AgentLoop:
 
         _maybe_nudge_tool_use(messages)
 
+        # Set streaming progress callback on provider (OAuth CLI only)
+        self._set_provider_progress(origin_channel, origin_chat_id, session_key)
+
         # Agent loop (limited for announce handling)
         pre_loop_len = len(messages)
-        final_content = await run_tool_loop(
-            provider=self.provider,
-            tools=self.tools,
-            messages=messages,
-            model=self.model,
-            max_iterations=self.max_iterations,
-            on_tool_call=self._make_progress_callback(origin_channel, origin_chat_id, session_key),
-        )
+        try:
+            final_content = await run_tool_loop(
+                provider=self.provider,
+                tools=self.tools,
+                messages=messages,
+                model=self.model,
+                max_iterations=self.max_iterations,
+                on_tool_call=self._make_progress_callback(origin_channel, origin_chat_id, session_key),
+            )
+        finally:
+            self._clear_provider_progress()
 
         if not final_content:
             final_content = "Background task completed."

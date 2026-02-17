@@ -1,8 +1,12 @@
 """Base LLM provider interface."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+# Async callback for streaming progress updates (receives formatted text)
+ProgressCallback = Callable[[str], Awaitable[None]]
 
 
 @dataclass
@@ -39,6 +43,7 @@ class LLMProvider(ABC):
     def __init__(self, api_key: str | None = None, api_base: str | None = None):
         self.api_key = api_key
         self.api_base = api_base
+        self.progress_callback: ProgressCallback | None = None
     
     @abstractmethod
     async def chat(

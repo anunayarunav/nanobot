@@ -48,6 +48,7 @@ def make_provider(config: Config, model: str | None = None, mode: str | None = N
             oauth_token=oauth_token,
             default_model=model,
             claude_bin=claude_bin,
+            timeout=1200.0,
         )
 
     # API key mode — use LiteLLM

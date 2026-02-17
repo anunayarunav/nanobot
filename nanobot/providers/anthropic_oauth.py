@@ -3,17 +3,24 @@
 Uses the Claude CLI (`claude -p`) as a proxy since the API requires
 cryptographic verification that only the official CLI provides.
 The OAuth token is passed via CLAUDE_CODE_OAUTH_TOKEN env var.
+
+Streams stdout line-by-line using --output-format stream-json --verbose
+to provide real-time progress feedback while the CLI works.
 """
 
 import asyncio
 import json
 import os
 import shutil
+import time
 from typing import Any
 
 from loguru import logger
 
-from nanobot.providers.base import LLMProvider, LLMResponse
+from nanobot.providers.base import LLMProvider, LLMResponse, ProgressCallback
+
+_MIN_PROGRESS_INTERVAL = 3.0  # seconds between progress messages
+_READ_TIMEOUT = 30.0  # seconds before sending a heartbeat
 
 
 class AnthropicOAuthProvider(LLMProvider):
@@ -21,6 +28,7 @@ class AnthropicOAuthProvider(LLMProvider):
 
     Requires `claude` CLI installed (npm install -g @anthropic-ai/claude-code).
     Passes the OAuth token via CLAUDE_CODE_OAUTH_TOKEN environment variable.
+    Streams output for real-time progress via progress_callback.
     """
 
     def __init__(
@@ -28,11 +36,13 @@ class AnthropicOAuthProvider(LLMProvider):
         oauth_token: str,
         default_model: str = "anthropic/claude-opus-4-6",
         claude_bin: str | None = None,
+        timeout: float = 1200.0,
     ):
         super().__init__()
         self.oauth_token = oauth_token
         self.default_model = default_model
         self.claude_bin = claude_bin or shutil.which("claude") or "claude"
+        self.timeout = timeout
 
     async def chat(
         self,
@@ -46,7 +56,6 @@ class AnthropicOAuthProvider(LLMProvider):
         if "/" in model:
             model = model.split("/", 1)[1]
 
-        # Build the prompt from messages
         prompt = self._build_prompt(messages)
 
         # Claude CLI args — prompt is piped via stdin to avoid ARG_MAX limits
@@ -54,11 +63,16 @@ class AnthropicOAuthProvider(LLMProvider):
             self.claude_bin,
             "-p",
             "--model", model,
-            "--output-format", "json",
+            "--output-format", "stream-json",
+            "--verbose",
             "--dangerously-skip-permissions",
         ]
 
-        env = {**os.environ, "CLAUDE_CODE_OAUTH_TOKEN": self.oauth_token, "CLAUDE_CODE_ENTRYPOINT": "cli"}
+        env = {
+            **os.environ,
+            "CLAUDE_CODE_OAUTH_TOKEN": self.oauth_token,
+            "CLAUDE_CODE_ENTRYPOINT": "cli",
+        }
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -68,28 +82,8 @@ class AnthropicOAuthProvider(LLMProvider):
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(input=prompt.encode()), timeout=600.0
-            )
+            return await self._stream_response(proc, prompt)
 
-            if proc.returncode != 0:
-                err = stderr.decode().strip() or stdout.decode().strip()
-                logger.error(f"Claude CLI error (exit {proc.returncode}): {err}")
-                return LLMResponse(
-                    content=f"Claude CLI error: {err}",
-                    finish_reason="error",
-                )
-
-            return self._parse_cli_output(stdout.decode())
-
-        except asyncio.TimeoutError:
-            logger.error("Claude CLI timed out after 600s")
-            try:
-                proc.kill()
-                await proc.wait()
-            except Exception:
-                pass
-            return LLMResponse(content="Claude CLI timed out", finish_reason="error")
         except FileNotFoundError:
             logger.error(f"Claude CLI not found at: {self.claude_bin}")
             return LLMResponse(
@@ -99,6 +93,168 @@ class AnthropicOAuthProvider(LLMProvider):
         except Exception as e:
             logger.error(f"Claude CLI error: {e}")
             return LLMResponse(content=f"Error: {str(e)}", finish_reason="error")
+
+    async def _stream_response(
+        self,
+        proc: asyncio.subprocess.Process,
+        prompt: str,
+    ) -> LLMResponse:
+        """Stream stdout from the Claude CLI, forwarding progress and collecting the result."""
+        # Capture callback at call time for concurrency safety
+        progress_cb = self.progress_callback
+
+        # Drain stderr in background to prevent pipe blocking
+        stderr_task = asyncio.create_task(self._drain_stderr(proc))
+
+        # Write prompt to stdin and close
+        try:
+            proc.stdin.write(prompt.encode())
+            await proc.stdin.drain()
+            proc.stdin.close()
+        except Exception as e:
+            logger.warning(f"Failed to write to Claude CLI stdin: {e}")
+
+        # Streaming state
+        result_content: str | None = None
+        result_usage: dict[str, Any] = {}
+        is_error = False
+        last_progress_time = 0.0
+        accumulated_text: list[str] = []
+
+        deadline = time.monotonic() + self.timeout
+
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.error(f"Claude CLI timed out after {self.timeout}s")
+                    proc.kill()
+                    await proc.wait()
+                    return LLMResponse(content="Claude CLI timed out", finish_reason="error")
+
+                try:
+                    line_bytes = await asyncio.wait_for(
+                        proc.stdout.readline(),
+                        timeout=min(remaining, _READ_TIMEOUT),
+                    )
+                except asyncio.TimeoutError:
+                    # No output for 30s — send heartbeat
+                    if progress_cb:
+                        elapsed = int(time.monotonic() - (deadline - self.timeout))
+                        mins, secs = divmod(elapsed, 60)
+                        label = f"{mins}m{secs}s" if mins else f"{secs}s"
+                        try:
+                            await progress_cb(f"⏳ Still working... ({label})")
+                        except Exception:
+                            pass
+                    continue
+
+                if not line_bytes:
+                    break  # EOF — process closed stdout
+
+                line = line_bytes.decode("utf-8", errors="replace").rstrip("\n\r")
+                if not line:
+                    continue
+
+                # Parse JSON event
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    accumulated_text.append(line)
+                    continue
+
+                if not isinstance(event, dict):
+                    accumulated_text.append(line)
+                    continue
+
+                event_type = event.get("type", "")
+
+                if event_type == "result":
+                    result_content = event.get("result", "")
+                    is_error = event.get("is_error", False)
+                    if "cost_usd" in event:
+                        result_usage["cost_usd"] = event["cost_usd"]
+                    if "total_cost_usd" in event:
+                        result_usage["total_cost_usd"] = event["total_cost_usd"]
+
+                elif event_type == "assistant":
+                    last_progress_time = await self._handle_assistant_event(
+                        event, progress_cb, last_progress_time,
+                    )
+
+                elif event_type == "system":
+                    logger.debug(f"Claude CLI init: {json.dumps(event)[:200]}")
+
+                else:
+                    logger.debug(f"Claude CLI event '{event_type}': {line[:200]}")
+
+        except Exception as e:
+            logger.error(f"Error reading Claude CLI stdout: {e}")
+
+        # Wait for stderr and process exit
+        stderr_output = await stderr_task
+        await proc.wait()
+
+        if proc.returncode != 0 and result_content is None:
+            err = stderr_output or "unknown error"
+            logger.error(f"Claude CLI error (exit {proc.returncode}): {err}")
+            return LLMResponse(content=f"Claude CLI error: {err}", finish_reason="error")
+
+        # Prefer explicit result event
+        if result_content is not None:
+            return LLMResponse(
+                content=result_content,
+                finish_reason="error" if is_error else "stop",
+                usage=result_usage,
+            )
+
+        # Fallback: no result event (GitHub issue #1920)
+        if accumulated_text:
+            logger.warning("No result event from Claude CLI; using accumulated text")
+            return LLMResponse(content="\n".join(accumulated_text), finish_reason="stop")
+
+        return LLMResponse(content="Claude CLI produced no output", finish_reason="error")
+
+    @staticmethod
+    async def _handle_assistant_event(
+        event: dict[str, Any],
+        progress_cb: ProgressCallback | None,
+        last_progress_time: float,
+    ) -> float:
+        """Extract tool usage from an assistant event and send progress. Returns updated timestamp."""
+        if not progress_cb:
+            return last_progress_time
+
+        now = time.monotonic()
+        if now - last_progress_time < _MIN_PROGRESS_INTERVAL:
+            return last_progress_time
+
+        message = event.get("message", {})
+        content_blocks = message.get("content", [])
+
+        for block in content_blocks:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                name = block.get("name", "?")
+                detail = _tool_detail(name, block.get("input", {}))
+                try:
+                    await progress_cb(f"🔧 `{name}`: {detail}")
+                except Exception:
+                    pass
+                return now
+
+        return last_progress_time
+
+    @staticmethod
+    async def _drain_stderr(proc: asyncio.subprocess.Process) -> str:
+        """Read all stderr to prevent pipe blocking."""
+        try:
+            data = await proc.stderr.read()
+            return data.decode("utf-8", errors="replace").strip()
+        except Exception as e:
+            logger.warning(f"Error draining Claude CLI stderr: {e}")
+            return ""
 
     @staticmethod
     def _build_prompt(messages: list[dict[str, Any]]) -> str:
@@ -136,25 +292,27 @@ class AnthropicOAuthProvider(LLMProvider):
                 parts.append(f"[Tool result from {name}:\n{result}]")
         return "\n\n".join(parts)
 
-    @staticmethod
-    def _parse_cli_output(output: str) -> LLMResponse:
-        """Parse Claude CLI JSON output into LLMResponse."""
-        try:
-            data = json.loads(output)
-            # JSON output format: {"type":"result","subtype":"success","cost_usd":...,"duration_ms":...,"duration_api_ms":...,"is_error":false,"num_turns":1,"result":"...","session_id":"...","total_cost_usd":...}
-            content = data.get("result", "")
-            is_error = data.get("is_error", False)
-            usage = {}
-            if "cost_usd" in data:
-                usage["cost_usd"] = data["cost_usd"]
-            return LLMResponse(
-                content=content,
-                finish_reason="error" if is_error else "stop",
-                usage=usage,
-            )
-        except json.JSONDecodeError:
-            # Plain text output (non-JSON mode fallback)
-            return LLMResponse(content=output.strip(), finish_reason="stop")
-
     def get_default_model(self) -> str:
         return self.default_model
+
+
+def _tool_detail(name: str, tool_input: dict[str, Any]) -> str:
+    """Extract a brief description from a tool's input."""
+    if name == "Bash":
+        cmd = str(tool_input.get("command", ""))
+        return cmd[:80] + "..." if len(cmd) > 80 else cmd
+    elif name in ("Read", "Write", "Edit"):
+        return str(tool_input.get("file_path", ""))[:80]
+    elif name == "Glob":
+        return str(tool_input.get("pattern", ""))[:80]
+    elif name == "Grep":
+        return str(tool_input.get("pattern", ""))[:80]
+    elif name in ("WebSearch", "WebFetch"):
+        return str(tool_input.get("query", tool_input.get("url", "")))[:80]
+    elif name == "Task":
+        return str(tool_input.get("prompt", ""))[:80]
+    # Generic: first key-value
+    for k, v in tool_input.items():
+        v_str = str(v)
+        return f"{k}={v_str[:60]}" if len(v_str) > 60 else f"{k}={v_str}"
+    return ""
