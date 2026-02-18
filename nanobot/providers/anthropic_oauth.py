@@ -107,6 +107,7 @@ class AnthropicOAuthProvider(LLMProvider):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                limit=2 * 1024 * 1024,  # 2MB — CLI can emit large JSON lines
             )
             return await self._stream_response(proc, prompt)
 
