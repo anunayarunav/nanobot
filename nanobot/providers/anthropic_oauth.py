@@ -36,13 +36,11 @@ class AnthropicOAuthProvider(LLMProvider):
         oauth_token: str,
         default_model: str = "anthropic/claude-opus-4-6",
         claude_bin: str | None = None,
-        timeout: float = 1200.0,
     ):
         super().__init__()
         self.oauth_token = oauth_token
         self.default_model = default_model
         self.claude_bin = claude_bin or shutil.which("claude") or "claude"
-        self.timeout = timeout
 
     async def chat(
         self,
@@ -119,28 +117,20 @@ class AnthropicOAuthProvider(LLMProvider):
         result_usage: dict[str, Any] = {}
         is_error = False
         last_progress_time = 0.0
+        start_time = time.monotonic()
         accumulated_text: list[str] = []
-
-        deadline = time.monotonic() + self.timeout
 
         try:
             while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    logger.error(f"Claude CLI timed out after {self.timeout}s")
-                    proc.kill()
-                    await proc.wait()
-                    return LLMResponse(content="Claude CLI timed out", finish_reason="error")
-
                 try:
                     line_bytes = await asyncio.wait_for(
                         proc.stdout.readline(),
-                        timeout=min(remaining, _READ_TIMEOUT),
+                        timeout=_READ_TIMEOUT,
                     )
                 except asyncio.TimeoutError:
                     # No output for 30s — send heartbeat
                     if progress_cb:
-                        elapsed = int(time.monotonic() - (deadline - self.timeout))
+                        elapsed = int(time.monotonic() - start_time)
                         mins, secs = divmod(elapsed, 60)
                         label = f"{mins}m{secs}s" if mins else f"{secs}s"
                         try:
