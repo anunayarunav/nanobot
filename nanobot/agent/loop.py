@@ -220,7 +220,7 @@ class AgentLoop:
     def _set_provider_progress(
         self, channel: str, chat_id: str, session_key: str,
     ) -> None:
-        """Set streaming progress callback on the provider (OAuth CLI only)."""
+        """Set streaming progress and message callbacks on the provider (OAuth CLI only)."""
         from nanobot.providers.anthropic_oauth import AnthropicOAuthProvider
         if not isinstance(self.provider, AnthropicOAuthProvider):
             return
@@ -228,6 +228,7 @@ class AgentLoop:
         level = self.debug_levels.get(session_key, "moderate")
         if level == "none":
             self.provider.progress_callback = None
+            self.provider.message_callback = None
             return
 
         async def _on_progress(text: str) -> None:
@@ -235,12 +236,20 @@ class AgentLoop:
                 channel=channel, chat_id=chat_id, content=text,
             ))
 
+        async def _on_message(content: str, media: list[str]) -> None:
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=channel, chat_id=chat_id, content=content, media=media,
+            ))
+
         self.provider.progress_callback = _on_progress
+        self.provider.message_callback = _on_message
 
     def _clear_provider_progress(self) -> None:
-        """Clear the provider's progress callback after processing."""
+        """Clear the provider's progress and message callbacks after processing."""
         if hasattr(self.provider, "progress_callback"):
             self.provider.progress_callback = None
+        if hasattr(self.provider, "message_callback"):
+            self.provider.message_callback = None
 
     async def _dispatch_command(self, msg: InboundMessage) -> OutboundMessage | None:
         """Dispatch a slash command and handle side-effects."""

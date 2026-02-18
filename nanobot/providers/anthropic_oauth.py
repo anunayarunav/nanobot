@@ -6,12 +6,16 @@ The OAuth token is passed via CLAUDE_CODE_OAUTH_TOKEN env var.
 
 Streams stdout line-by-line using --output-format stream-json --verbose
 to provide real-time progress feedback while the CLI works.
+
+When message_callback is set, starts an MCP bridge so the CLI can send
+messages (with media) back to the user through nanobot's channel layer.
 """
 
 import asyncio
 import json
 import os
 import shutil
+import tempfile
 import time
 from typing import Any
 
@@ -72,6 +76,30 @@ class AnthropicOAuthProvider(LLMProvider):
             "CLAUDE_CODE_ENTRYPOINT": "cli",
         }
 
+        # MCP bridge setup — gives CLI access to nanobot's message bus
+        socket_path: str | None = None
+        socket_server: asyncio.AbstractServer | None = None
+        mcp_config_path: str | None = None
+
+        if self.message_callback:
+            try:
+                from nanobot.mcp.listener import start_listener, generate_mcp_config
+
+                socket_path, socket_server = await start_listener(
+                    message_cb=self.message_callback,
+                    progress_cb=self.progress_callback,
+                )
+                mcp_config = generate_mcp_config(socket_path)
+                mcp_config_path = socket_path.replace(".sock", ".json")
+                with open(mcp_config_path, "w") as f:
+                    json.dump(mcp_config, f)
+
+                args.extend(["--mcp-config", mcp_config_path])
+                logger.debug(f"MCP bridge enabled: {socket_path}")
+            except Exception as e:
+                logger.warning(f"Failed to start MCP bridge: {e}")
+                # Continue without MCP — CLI still works, just can't send messages
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *args,
@@ -91,6 +119,15 @@ class AnthropicOAuthProvider(LLMProvider):
         except Exception as e:
             logger.error(f"Claude CLI error: {e}")
             return LLMResponse(content=f"Error: {str(e)}", finish_reason="error")
+        finally:
+            # Clean up MCP bridge
+            if socket_server:
+                socket_server.close()
+                await socket_server.wait_closed()
+            if socket_path and os.path.exists(socket_path):
+                os.unlink(socket_path)
+            if mcp_config_path and os.path.exists(mcp_config_path):
+                os.unlink(mcp_config_path)
 
     async def _stream_response(
         self,
@@ -227,6 +264,9 @@ class AnthropicOAuthProvider(LLMProvider):
                 continue
             if block.get("type") == "tool_use":
                 name = block.get("name", "?")
+                # Skip MCP bridge tools — message is delivered directly
+                if name.startswith("mcp__nanobot__"):
+                    return last_progress_time
                 detail = _tool_detail(name, block.get("input", {}))
                 try:
                     await progress_cb(f"🔧 `{name}`: {detail}")

@@ -8,6 +8,9 @@ from typing import Any
 # Async callback for streaming progress updates (receives formatted text)
 ProgressCallback = Callable[[str], Awaitable[None]]
 
+# Async callback for sending messages with media (content, media_paths)
+MessageCallback = Callable[[str, list[str]], Awaitable[None]]
+
 
 @dataclass
 class ToolCallRequest:
@@ -44,6 +47,7 @@ class LLMProvider(ABC):
         self.api_key = api_key
         self.api_base = api_base
         self.progress_callback: ProgressCallback | None = None
+        self.message_callback: MessageCallback | None = None
     
     @abstractmethod
     async def chat(
