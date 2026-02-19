@@ -381,17 +381,6 @@ class AgentLoop:
         from nanobot.agent.terminal import run_terminal_command
 
         terminal_cfg = self.config.terminal
-        command_preview = terminal_cfg.command.replace(
-            "{message}", msg.content[:60] + "..." if len(msg.content) > 60 else msg.content,
-        )
-        preview = command_preview[:120] + "..." if len(command_preview) > 120 else command_preview
-
-        # Progress notification so the user sees what's running
-        await self.bus.publish_outbound(OutboundMessage(
-            channel=msg.channel,
-            chat_id=msg.chat_id,
-            content=f"⏳ `{preview}`",
-        ))
 
         return await run_terminal_command(
             msg=msg,
