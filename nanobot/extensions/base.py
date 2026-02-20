@@ -22,6 +22,16 @@ class Extension:
         """Called once when the extension is loaded. config = extension options dict."""
         pass
 
+    async def pre_process(
+        self, msg: Any, session: Any, ctx: ExtensionContext,
+    ) -> str | None:
+        """Called before LLM processing. Return a string to short-circuit
+        (skip LLM, use that string as response). Return None to proceed normally.
+
+        Use case: credit gating, rate limiting, content filtering, etc.
+        """
+        return None
+
     async def transform_history(
         self, history: list[dict[str, Any]], session: Any, ctx: ExtensionContext
     ) -> list[dict[str, Any]]:

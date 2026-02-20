@@ -62,6 +62,20 @@ class ExtensionManager:
         except Exception as e:
             logger.error(f"Failed to load extension {class_path}: {e}")
 
+    async def pre_process(
+        self, msg: Any, session: Any, ctx: ExtensionContext,
+    ) -> str | None:
+        """Run pre_process hooks. First non-None return short-circuits."""
+        for ext in self._extensions:
+            try:
+                result = await ext.pre_process(msg, session, ctx)
+                if result is not None:
+                    logger.info(f"Extension {ext.name} short-circuited processing")
+                    return result
+            except Exception as e:
+                logger.error(f"Extension {ext.name} failed in pre_process: {e}")
+        return None
+
     async def transform_history(
         self, history: list[dict[str, Any]], session: Any, ctx: ExtensionContext
     ) -> list[dict[str, Any]]:

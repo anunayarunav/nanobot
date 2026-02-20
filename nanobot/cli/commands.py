@@ -204,6 +204,26 @@ def gateway(
     from nanobot.extensions.manager import ExtensionManager
     ext_mgr = ExtensionManager()
 
+    # Payment system setup
+    credit_store = None
+    webhook_server = None
+    if config.payments.enabled:
+        from nanobot.store.credits import CreditStore
+        from nanobot.web.server import WebhookServer
+
+        credit_store = CreditStore()
+        webhook_server = WebhookServer(
+            config=config.payments,
+            credit_store=credit_store,
+            send_callback=bus.publish_outbound,
+        )
+        # Inject shared store into credit extension config
+        for ext_cfg in config.extensions:
+            if "credits" in ext_cfg.class_path.lower():
+                ext_cfg.options["_payments_config"] = config.payments
+                ext_cfg.options["_credit_store"] = credit_store
+        console.print(f"[green]✓[/green] Payments: webhook port {config.payments.webhook_port}")
+
     # Create agent with cron service + extensions
     agent = AgentLoop(
         bus=bus,
@@ -266,15 +286,23 @@ def gateway(
     
     async def run():
         try:
+            if credit_store:
+                await credit_store.initialize()
             await ext_mgr.load_from_config(config.extensions)
             await cron.start()
             await heartbeat.start()
+            if webhook_server:
+                await webhook_server.start()
             await asyncio.gather(
                 agent.run(),
                 channels.start_all(),
             )
         except KeyboardInterrupt:
             console.print("\nShutting down...")
+            if webhook_server:
+                await webhook_server.stop()
+            if credit_store:
+                await credit_store.close()
             heartbeat.stop()
             cron.stop()
             agent.stop()
@@ -621,6 +649,66 @@ def cron_run(
         console.print(f"[green]✓[/green] Job executed")
     else:
         console.print(f"[red]Failed to run job {job_id}[/red]")
+
+
+# ============================================================================
+# Experiment Commands
+# ============================================================================
+
+experiment_app = typer.Typer(help="Manage bot experiments")
+app.add_typer(experiment_app, name="experiment")
+
+
+@experiment_app.command("create")
+def experiment_create(
+    name: str = typer.Argument(..., help="Experiment name (e.g. ai-interview-answer)"),
+    base_dir: str = typer.Option("../telegram-experiments", "--dir", "-d", help="Base directory"),
+):
+    """Create a new bot experiment project with boilerplate."""
+    from nanobot.cli.scaffold import create_experiment
+
+    base = Path(base_dir).resolve()
+    try:
+        project = create_experiment(name, base)
+        console.print(f"[green]✓[/green] Created experiment: {project}")
+        console.print(f"\nNext steps:")
+        console.print(f"  1. Edit [cyan]{project}/.nanobot/config.json[/cyan] — fill in tokens")
+        console.print(f"  2. Edit [cyan]{project}/bot.py[/cyan] — customize your micro-agent")
+        console.print(f"  3. Run: [cyan]cd {project} && ./run.sh[/cyan]")
+    except FileExistsError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+
+@experiment_app.command("list")
+def experiment_list(
+    base_dir: str = typer.Option("../telegram-experiments", "--dir", "-d", help="Base directory"),
+):
+    """List all bot experiments."""
+    from nanobot.cli.scaffold import list_experiments
+
+    base = Path(base_dir).resolve()
+    experiments = list_experiments(base)
+
+    if not experiments:
+        console.print(f"No experiments found in {base}")
+        console.print(f"Create one: [cyan]nanobot experiment create my-bot[/cyan]")
+        return
+
+    table = Table(title="Bot Experiments")
+    table.add_column("Name", style="cyan")
+    table.add_column("Config")
+    table.add_column("Bot")
+    table.add_column("Ready")
+    table.add_column("Path", style="dim")
+
+    for exp in experiments:
+        config_status = "[green]✓[/green]" if exp["has_config"] else "[red]✗[/red]"
+        bot_status = "[green]✓[/green]" if exp.get("has_bot") else "[red]✗[/red]"
+        ready_status = "[green]✓[/green]" if exp["configured"] else "[yellow]fill in tokens[/yellow]"
+        table.add_row(exp["name"], config_status, bot_status, ready_status, exp["path"])
+
+    console.print(table)
 
 
 # ============================================================================

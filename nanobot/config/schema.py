@@ -131,6 +131,26 @@ class ExtensionConfig(BaseModel):
     options: dict[str, Any] = Field(default_factory=dict)
 
 
+class CreditPack(BaseModel):
+    """A purchasable credit pack."""
+    credits: int             # e.g. 25
+    price_cents: int         # e.g. 499 = $4.99
+    label: str = ""          # e.g. "$4.99 for 25 answers"
+
+
+class PaymentsConfig(BaseModel):
+    """Credit-based payment configuration (Stripe)."""
+    enabled: bool = False
+    stripe_api_key: str = ""           # sk_test_... or sk_live_...
+    stripe_webhook_secret: str = ""    # whsec_...
+    free_credits: int = 3
+    credit_packs: list[CreditPack] = Field(default_factory=list)
+    webhook_port: int = 8080
+    webhook_base_path: str = ""        # e.g. "/interview-helper" for path-based routing
+    success_url: str = ""              # e.g. https://t.me/bot_username
+    cancel_url: str = ""
+
+
 class CommandsConfig(BaseModel):
     """Slash command allowlist. Master bot controls which commands each worker gets."""
     allowed: list[str] = Field(default_factory=lambda: ["model", "help"])
@@ -182,7 +202,8 @@ class Config(BaseSettings):
     extensions: list[ExtensionConfig] = Field(default_factory=list)
     commands: CommandsConfig = Field(default_factory=CommandsConfig)
     terminal: TerminalConfig = Field(default_factory=TerminalConfig)
-    
+    payments: PaymentsConfig = Field(default_factory=PaymentsConfig)
+
     @property
     def workspace_path(self) -> Path:
         """Get expanded workspace path."""

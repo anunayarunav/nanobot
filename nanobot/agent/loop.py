@@ -361,7 +361,28 @@ class AgentLoop:
         """Process a message and publish the response. Wraps _process_message for task use."""
         try:
             if self.config and self.config.terminal.enabled:
+                # Terminal mode: run extension hooks around the terminal command
+                # so credit gating + deduction work without the LLM pipeline.
+                ctx = ExtensionContext(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    session_key=msg.session_key, workspace=str(self.workspace),
+                )
+
+                # HOOK: pre_process — credit gating (blocks zero-credit users)
+                gated = await self.extensions.pre_process(msg, None, ctx)
+                if gated is not None:
+                    await self.bus.publish_outbound(OutboundMessage(
+                        channel=msg.channel, chat_id=msg.chat_id, content=gated,
+                    ))
+                    return
+
                 response = await self._process_terminal_message(msg)
+
+                # HOOK: transform_response — credit deduction after successful answer
+                if response and response.content:
+                    response.content = await self.extensions.transform_response(
+                        response.content, ctx,
+                    )
             else:
                 response = await self._process_message(msg, cancel_event)
             if response:
@@ -419,6 +440,17 @@ class AgentLoop:
             channel=msg.channel, chat_id=msg.chat_id,
             session_key=msg.session_key, workspace=str(self.workspace),
         )
+
+        # HOOK: pre_process — allows extensions to short-circuit before LLM call
+        gated_response = await self.extensions.pre_process(msg, session, ctx)
+        if gated_response is not None:
+            session.add_message("user", msg.content)
+            session.add_message("assistant", gated_response)
+            await self.extensions.pre_session_save(session, ctx)
+            self.sessions.save(session)
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content=gated_response,
+            )
 
         # HOOK: transform_history
         history = session.get_history()
