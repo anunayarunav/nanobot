@@ -212,7 +212,7 @@ async def execute_terminal_command(
             stdin=asyncio.subprocess.PIPE if stdin_data else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=workspace,
+            cwd=_project_root(workspace),
             env=env,
         )
 
@@ -295,7 +295,7 @@ async def _execute_terminal_rich(
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=workspace,
+            cwd=_project_root(workspace),
             env=env,
         )
     except Exception as e:
@@ -478,6 +478,17 @@ async def _execute_terminal_rich(
 # Unified entry point
 # ---------------------------------------------------------------------------
 
+def _project_root(workspace: str) -> str:
+    """Derive the project root from the workspace path.
+
+    Workspace is ``{project}/.nanobot/workspace``.  The project root is
+    two levels up.  Terminal scripts (``bot.py``) live at the project
+    root, so we use this as ``cwd`` for subprocesses.
+    """
+    root = Path(workspace).parent.parent
+    return str(root) if root.is_dir() else workspace
+
+
 async def run_terminal_command(
     msg: InboundMessage,
     config: TerminalConfig,
@@ -488,6 +499,8 @@ async def run_terminal_command(
 
     Routes to plain or rich mode based on ``config.protocol``.  In both
     modes, a JSON input envelope is written to the subprocess's stdin.
+    The subprocess ``cwd`` is the project root (parent of ``.nanobot``),
+    not the workspace directory.
     """
     if config.protocol == "rich":
         return await _execute_terminal_rich(msg, config, workspace, publish)
