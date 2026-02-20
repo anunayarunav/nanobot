@@ -379,7 +379,8 @@ class AgentLoop:
                 response = await self._process_terminal_message(msg)
 
                 # HOOK: transform_response — credit deduction after successful answer
-                if response and response.content:
+                # Skip on errors so users aren't charged for failed requests.
+                if response and response.content and not response.error:
                     response.content = await self.extensions.transform_response(
                         response.content, ctx,
                     )

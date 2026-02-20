@@ -228,13 +228,16 @@ async def execute_terminal_command(
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                content=f"Command timed out after {timeout}s",
+                content="Something went wrong. Please try again later.",
+                error=True,
             )
     except Exception as e:
+        logger.error(f"Terminal exec error: {e}")
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
-            content=f"Error: {e}",
+            content="Something went wrong. Please try again later.",
+            error=True,
         )
 
     stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
@@ -296,9 +299,11 @@ async def _execute_terminal_rich(
             env=env,
         )
     except Exception as e:
+        logger.error(f"Failed to start terminal process: {e}")
         return OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id,
-            content=f"Error starting process: {e}",
+            content="Something went wrong. Please try again later.",
+            error=True,
         )
 
     # Write input envelope and close stdin
@@ -372,10 +377,11 @@ async def _execute_terminal_rich(
             elif frame_type == "error":
                 code = frame.get("code", "")
                 error_text = frame.get("text", "Unknown error")
-                prefix = f"Error ({code}): " if code else "Error: "
+                logger.error(f"Terminal error [{msg.session_key}]: {code} — {error_text}")
                 final_message = OutboundMessage(
                     channel=msg.channel, chat_id=msg.chat_id,
-                    content=f"{prefix}{error_text}",
+                    content="Something went wrong. Please try again later.",
+                    error=True,
                 )
 
             elif frame_type == "log":
@@ -400,7 +406,8 @@ async def _execute_terminal_rich(
         )
         timeout_msg = OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id,
-            content=f"Command timed out after {config.timeout}s",
+            content="Something went wrong. Please try again later.",
+            error=True,
         )
         if final_message is not None:
             await publish(final_message)
@@ -422,41 +429,47 @@ async def _execute_terminal_rich(
     else:
         logger.info(f"Terminal process [{msg.session_key}] exited with code {rc}")
 
+    is_error = bool(rc and rc != 0)
+
     # If we got accumulated plain text but no structured message, fall back
     if accumulated_text and final_message is None:
-        combined = "\n".join(accumulated_text)
-        media = extract_media_paths(combined)
-        parts = [combined]
-        if stderr:
-            parts.append(f"STDERR:\n{stderr}")
-        if process.returncode and process.returncode != 0:
-            parts.append(f"Exit code: {process.returncode}")
-        final_message = OutboundMessage(
-            channel=msg.channel, chat_id=msg.chat_id,
-            content="\n".join(parts),
-            media=media,
-        )
+        if is_error:
+            # Non-zero exit with no message frame — hide internals
+            logger.error(f"Terminal failed [{msg.session_key}]: {chr(10).join(accumulated_text[:5])}")
+            final_message = OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="Something went wrong. Please try again later.",
+                error=True,
+            )
+        else:
+            combined = "\n".join(accumulated_text)
+            media = extract_media_paths(combined)
+            final_message = OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content=combined,
+                media=media,
+            )
     elif final_message is None:
         # No output at all
-        parts = []
-        if stderr:
-            parts.append(f"STDERR:\n{stderr}")
-        if process.returncode and process.returncode != 0:
-            parts.append(f"Exit code: {process.returncode}")
-        content = "\n".join(parts) if parts else "(no output)"
-        final_message = OutboundMessage(
-            channel=msg.channel, chat_id=msg.chat_id,
-            content=content,
-        )
+        if is_error:
+            if stderr:
+                logger.error(f"Terminal stderr [{msg.session_key}]: {stderr[:500]}")
+            final_message = OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="Something went wrong. Please try again later.",
+                error=True,
+            )
+        else:
+            final_message = OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="(no output)",
+            )
     else:
-        # Append stderr/exit code to final message if relevant
-        extras: list[str] = []
+        # Log stderr for diagnostics but don't show to user
         if stderr:
-            extras.append(f"STDERR:\n{stderr}")
-        if process.returncode and process.returncode != 0:
-            extras.append(f"Exit code: {process.returncode}")
-        if extras:
-            final_message.content += "\n" + "\n".join(extras)
+            logger.warning(f"Terminal stderr [{msg.session_key}]: {stderr[:500]}")
+        if is_error and not final_message.error:
+            logger.warning(f"Terminal exited {rc} but had message frame — keeping response")
 
     return final_message
 
