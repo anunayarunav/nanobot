@@ -1,7 +1,9 @@
 """Telegram channel implementation using python-telegram-bot."""
 
 import asyncio
+import json
 import re
+import subprocess
 from pathlib import Path
 
 from loguru import logger
@@ -22,6 +24,38 @@ _GROUPABLE_EXTS = _PHOTO_EXTS | _VIDEO_EXTS  # can go into a media group
 
 _TG_MAX_LENGTH = 4096
 _SEND_RETRIES = 3
+
+
+def _probe_video(path: Path) -> dict[str, int]:
+    """Extract width, height, and duration from a video file via ffprobe.
+
+    Returns a dict with keys present only when successfully extracted,
+    e.g. {"width": 1080, "height": 1920, "duration": 12}.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "-show_streams", "-select_streams", "v:0", str(path),
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return {}
+        data = json.loads(result.stdout)
+        stream = data.get("streams", [{}])[0]
+        info: dict[str, int] = {}
+        if "width" in stream and "height" in stream:
+            info["width"] = int(stream["width"])
+            info["height"] = int(stream["height"])
+        # duration lives on the stream or container level
+        dur = stream.get("duration") or data.get("format", {}).get("duration")
+        if dur:
+            info["duration"] = int(float(dur))
+        return info
+    except Exception as e:
+        logger.debug(f"ffprobe failed for {path}: {e}")
+        return {}
 
 
 def _chunk_text(text: str, max_len: int = _TG_MAX_LENGTH) -> list[str]:
@@ -253,7 +287,10 @@ class TelegramChannel(BaseChannel):
         for p in files:
             suffix = p.suffix.lower()
             if suffix in _VIDEO_EXTS:
-                media_items.append(InputMediaVideo(media=open(p, "rb"), supports_streaming=True))
+                probe = _probe_video(p)
+                media_items.append(InputMediaVideo(
+                    media=open(p, "rb"), supports_streaming=True, **probe,
+                ))
             else:
                 media_items.append(InputMediaPhoto(media=open(p, "rb")))
         try:
@@ -277,8 +314,10 @@ class TelegramChannel(BaseChannel):
                 if suffix in _PHOTO_EXTS:
                     await self._app.bot.send_photo(chat_id=chat_id, photo=f)
                 elif suffix in _VIDEO_EXTS:
+                    probe = _probe_video(file_path)
                     await self._app.bot.send_video(
                         chat_id=chat_id, video=f, supports_streaming=True,
+                        **probe,
                     )
                 elif suffix in _AUDIO_EXTS:
                     await self._app.bot.send_audio(chat_id=chat_id, audio=f)
