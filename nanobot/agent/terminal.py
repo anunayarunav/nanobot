@@ -184,6 +184,19 @@ def _build_env(config: TerminalConfig) -> dict[str, str] | None:
 
 
 # ---------------------------------------------------------------------------
+# Cancellation watcher (shared by both protocols)
+# ---------------------------------------------------------------------------
+
+async def _cancel_watcher(
+    event: asyncio.Event, proc: asyncio.subprocess.Process,
+) -> None:
+    """Await *event* and kill the subprocess when it fires."""
+    await event.wait()
+    if proc.returncode is None:
+        proc.kill()
+
+
+# ---------------------------------------------------------------------------
 # Plain protocol (original behaviour)
 # ---------------------------------------------------------------------------
 
@@ -195,6 +208,7 @@ async def execute_terminal_command(
     *,
     stdin_data: str | None = None,
     env: dict[str, str] | None = None,
+    cancel_event: asyncio.Event | None = None,
 ) -> OutboundMessage:
     """Execute a user message as a shell command via a template.
 
@@ -206,6 +220,7 @@ async def execute_terminal_command(
     preview = command[:120] + "..." if len(command) > 120 else command
     logger.info(f"Terminal exec [{msg.session_key}]: {preview}")
 
+    watcher: asyncio.Task | None = None
     try:
         process = await asyncio.create_subprocess_shell(
             command,
@@ -215,6 +230,9 @@ async def execute_terminal_command(
             cwd=_project_root(workspace),
             env=env,
         )
+
+        if cancel_event is not None:
+            watcher = asyncio.create_task(_cancel_watcher(cancel_event, process))
 
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -238,6 +256,17 @@ async def execute_terminal_command(
             chat_id=msg.chat_id,
             content="Something went wrong. Please try again later.",
             error=True,
+        )
+    finally:
+        if watcher is not None:
+            watcher.cancel()
+
+    # Cancelled by /stop
+    if cancel_event is not None and cancel_event.is_set():
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content="Operation cancelled.",
         )
 
     stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
@@ -274,6 +303,7 @@ async def _execute_terminal_rich(
     config: TerminalConfig,
     workspace: str,
     publish: Callable[[OutboundMessage], Awaitable[None]],
+    cancel_event: asyncio.Event | None = None,
 ) -> OutboundMessage | None:
     """Execute with the rich JSONL protocol.
 
@@ -305,6 +335,10 @@ async def _execute_terminal_rich(
             content="Something went wrong. Please try again later.",
             error=True,
         )
+
+    watcher: asyncio.Task | None = None
+    if cancel_event is not None:
+        watcher = asyncio.create_task(_cancel_watcher(cancel_event, process))
 
     # Write input envelope and close stdin
     assert process.stdin is not None
@@ -395,6 +429,21 @@ async def _execute_terminal_rich(
 
     except Exception as e:
         logger.error(f"Error reading terminal stdout: {e}")
+
+    # Clean up the cancel watcher
+    if watcher is not None:
+        watcher.cancel()
+
+    # Handle /stop cancellation
+    if cancel_event is not None and cancel_event.is_set():
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
+        logger.info(f"Terminal process [{msg.session_key}] cancelled by /stop")
+        return OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id,
+            content="Operation cancelled.",
+        )
 
     # Handle timeout
     if timed_out:
@@ -494,6 +543,7 @@ async def run_terminal_command(
     config: TerminalConfig,
     workspace: str,
     publish: Callable[[OutboundMessage], Awaitable[None]],
+    cancel_event: asyncio.Event | None = None,
 ) -> OutboundMessage | None:
     """Execute a terminal command using the configured protocol.
 
@@ -503,7 +553,9 @@ async def run_terminal_command(
     not the workspace directory.
     """
     if config.protocol == "rich":
-        return await _execute_terminal_rich(msg, config, workspace, publish)
+        return await _execute_terminal_rich(
+            msg, config, workspace, publish, cancel_event,
+        )
 
     # Plain mode — delegate to the original implementation
     stdin_data = _build_input_envelope(msg, workspace, config)
@@ -515,4 +567,5 @@ async def run_terminal_command(
         timeout=config.timeout,
         stdin_data=stdin_data,
         env=env,
+        cancel_event=cancel_event,
     )

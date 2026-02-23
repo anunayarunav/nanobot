@@ -320,9 +320,12 @@ class AgentLoop:
                 continue
 
             try:
-                # Commands dispatch immediately — never block
+                # Commands dispatch immediately — never block.
+                # In terminal mode only intercept interrupt commands (/stop)
+                # so that slash messages pass through to the subprocess.
+                is_terminal = self.config and self.config.terminal.enabled
                 if self.command_registry.is_interrupt(msg.content) or \
-                   self.command_registry.is_command(msg.content):
+                   (not is_terminal and self.command_registry.is_command(msg.content)):
                     response = await self._dispatch_command(msg)
                     if response:
                         await self.bus.publish_outbound(response)
@@ -376,7 +379,7 @@ class AgentLoop:
                     ))
                     return
 
-                response = await self._process_terminal_message(msg)
+                response = await self._process_terminal_message(msg, cancel_event)
 
                 # HOOK: transform_response — credit deduction after successful answer
                 # Skip on errors so users aren't charged for failed requests.
@@ -398,7 +401,9 @@ class AgentLoop:
         finally:
             self.cancel_events.pop(msg.session_key, None)
 
-    async def _process_terminal_message(self, msg: InboundMessage) -> OutboundMessage | None:
+    async def _process_terminal_message(
+        self, msg: InboundMessage, cancel_event: asyncio.Event | None = None,
+    ) -> OutboundMessage | None:
         """Execute a message as a shell command in terminal mode (no LLM)."""
         from nanobot.agent.terminal import run_terminal_command
 
@@ -409,6 +414,7 @@ class AgentLoop:
             config=terminal_cfg,
             workspace=str(self.workspace),
             publish=self.bus.publish_outbound,
+            cancel_event=cancel_event,
         )
 
     async def _process_message(
