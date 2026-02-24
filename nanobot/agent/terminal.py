@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shlex
+import signal
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -187,13 +188,28 @@ def _build_env(config: TerminalConfig) -> dict[str, str] | None:
 # Cancellation watcher (shared by both protocols)
 # ---------------------------------------------------------------------------
 
+def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
+    """Kill the subprocess and its entire process group.
+
+    ``create_subprocess_shell`` spawns ``sh -c <cmd>``.  Killing just the
+    shell leaves the child command running.  We kill the whole process
+    group instead so nothing survives.
+    """
+    if proc.returncode is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        # Already dead or we lack rights — fall back to direct kill
+        proc.kill()
+
+
 async def _cancel_watcher(
     event: asyncio.Event, proc: asyncio.subprocess.Process,
 ) -> None:
     """Await *event* and kill the subprocess when it fires."""
     await event.wait()
-    if proc.returncode is None:
-        proc.kill()
+    _kill_process_tree(proc)
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +245,7 @@ async def execute_terminal_command(
             stderr=asyncio.subprocess.PIPE,
             cwd=_project_root(workspace),
             env=env,
+            start_new_session=True,
         )
 
         if cancel_event is not None:
@@ -242,7 +259,7 @@ async def execute_terminal_command(
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
-            process.kill()
+            _kill_process_tree(process)
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
@@ -327,6 +344,7 @@ async def _execute_terminal_rich(
             stderr=asyncio.subprocess.PIPE,
             cwd=_project_root(workspace),
             env=env,
+            start_new_session=True,
         )
     except Exception as e:
         logger.error(f"Failed to start terminal process: {e}")
@@ -437,7 +455,7 @@ async def _execute_terminal_rich(
     # Handle /stop cancellation
     if cancel_event is not None and cancel_event.is_set():
         if process.returncode is None:
-            process.kill()
+            _kill_process_tree(process)
         await process.wait()
         logger.info(f"Terminal process [{msg.session_key}] cancelled by /stop")
         return OutboundMessage(
@@ -447,7 +465,7 @@ async def _execute_terminal_rich(
 
     # Handle timeout
     if timed_out:
-        process.kill()
+        _kill_process_tree(process)
         await process.wait()
         logger.warning(
             f"Terminal process [{msg.session_key}] killed after {config.timeout}s timeout"

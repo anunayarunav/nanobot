@@ -73,7 +73,8 @@ class CommandRegistry:
         if not text.startswith("/"):
             return False
         name = text.split()[0][1:]
-        return name in _INTERRUPT_COMMANDS and name in self._handlers and self._is_allowed(name)
+        # Interrupt commands bypass the allowlist — they're safety controls
+        return name in _INTERRUPT_COMMANDS and name in self._handlers
 
     async def dispatch(self, text: str, ctx: CommandContext) -> CommandResult | None:
         text = text.strip()
