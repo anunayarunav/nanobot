@@ -84,7 +84,7 @@ class CommandRegistry:
         name = parts[0][1:]
         if name not in self._handlers:
             return None
-        if not self._is_allowed(name):
+        if not self._is_allowed(name) and name not in _INTERRUPT_COMMANDS:
             return CommandResult(message=f"Command `/{name}` is not enabled for this bot.")
         ctx.raw_args = parts[1].strip() if len(parts) > 1 else ""
         logger.info(f"Command: /{name} args={ctx.raw_args!r}")
