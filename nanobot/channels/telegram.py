@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 from loguru import logger
@@ -23,7 +24,9 @@ _AUDIO_EXTS = {".mp3", ".ogg", ".m4a", ".wav", ".flac"}
 _GROUPABLE_EXTS = _PHOTO_EXTS | _VIDEO_EXTS  # can go into a media group
 
 _TG_MAX_LENGTH = 4096
+_TG_MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB Telegram Bot API limit
 _SEND_RETRIES = 3
+_MEDIA_RETRIES = 2
 
 
 def _probe_video(path: Path) -> dict[str, int]:
@@ -56,6 +59,56 @@ def _probe_video(path: Path) -> dict[str, int]:
     except Exception as e:
         logger.debug(f"ffprobe failed for {path}: {e}")
         return {}
+
+
+def _compress_video(path: Path, target_bytes: int = _TG_MAX_FILE_SIZE - 2 * 1024 * 1024) -> Path | None:
+    """Compress a video to fit within Telegram's upload limit using ffmpeg.
+
+    Returns path to the compressed temp file, or None on failure.
+    The caller is responsible for deleting the temp file.
+    """
+    probe = _probe_video(path)
+    duration = probe.get("duration", 0)
+    if duration <= 0:
+        logger.warning(f"Cannot compress {path}: unknown duration")
+        return None
+
+    # Target bitrate (bits/s) = target_bytes * 8 / duration, leave room for audio
+    audio_bitrate = 128_000  # 128 kbps
+    video_bitrate = int((target_bytes * 8) / duration - audio_bitrate)
+    if video_bitrate < 200_000:  # below 200 kbps = unwatchable
+        logger.warning(f"Cannot compress {path}: would need < 200 kbps for {duration}s")
+        return None
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+    tmp.close()
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", str(path),
+                "-c:v", "libx264", "-preset", "fast",
+                "-b:v", str(video_bitrate),
+                "-c:a", "aac", "-b:a", "128k",
+                "-movflags", "+faststart",
+                tmp.name,
+            ],
+            capture_output=True, text=True, timeout=600,
+        )
+        if result.returncode != 0:
+            logger.error(f"ffmpeg compression failed: {result.stderr[:500]}")
+            Path(tmp.name).unlink(missing_ok=True)
+            return None
+        compressed = Path(tmp.name)
+        logger.info(
+            f"Compressed video {path.name}: "
+            f"{path.stat().st_size / 1024 / 1024:.1f} MB → "
+            f"{compressed.stat().st_size / 1024 / 1024:.1f} MB"
+        )
+        return compressed
+    except Exception as e:
+        logger.error(f"ffmpeg compression error: {e}")
+        Path(tmp.name).unlink(missing_ok=True)
+        return None
 
 
 def _chunk_text(text: str, max_len: int = _TG_MAX_LENGTH) -> list[str]:
@@ -180,10 +233,13 @@ class TelegramChannel(BaseChannel):
         
         self._running = True
         
-        # Build the application
+        # Build the application with generous timeouts for media uploads
         self._app = (
             Application.builder()
             .token(self.config.token)
+            .read_timeout(60)
+            .write_timeout(60)
+            .connect_timeout(15)
             .build()
         )
         
@@ -307,25 +363,70 @@ class TelegramChannel(BaseChannel):
                     item.media.close()
 
     async def _send_single_media(self, chat_id: int, file_path: Path) -> None:
-        """Send a single media file using the appropriate Telegram method."""
+        """Send a single media file using the appropriate Telegram method.
+
+        Videos exceeding 50 MB are auto-compressed via ffmpeg before upload.
+        Transient timeouts are retried up to _MEDIA_RETRIES times.
+        """
         suffix = file_path.suffix.lower()
+        compressed: Path | None = None
+
+        # Auto-compress oversized videos
+        if suffix in _VIDEO_EXTS and file_path.stat().st_size > _TG_MAX_FILE_SIZE:
+            logger.info(
+                f"Video {file_path.name} is {file_path.stat().st_size / 1024 / 1024:.1f} MB "
+                f"(limit {_TG_MAX_FILE_SIZE / 1024 / 1024:.0f} MB), compressing..."
+            )
+            compressed = _compress_video(file_path)
+            if compressed:
+                file_path = compressed
+            else:
+                logger.error(f"Compression failed for {file_path}, skipping send")
+                return
+
         try:
-            with open(file_path, "rb") as f:
-                if suffix in _PHOTO_EXTS:
-                    await self._app.bot.send_photo(chat_id=chat_id, photo=f)
-                elif suffix in _VIDEO_EXTS:
-                    probe = _probe_video(file_path)
-                    await self._app.bot.send_video(
-                        chat_id=chat_id, video=f, supports_streaming=True,
-                        **probe,
+            await self._send_single_media_inner(chat_id, file_path, suffix)
+        finally:
+            if compressed:
+                compressed.unlink(missing_ok=True)
+
+    async def _send_single_media_inner(
+        self, chat_id: int, file_path: Path, suffix: str,
+    ) -> None:
+        """Send a single media file with retry on transient errors."""
+        for attempt in range(_MEDIA_RETRIES):
+            try:
+                with open(file_path, "rb") as f:
+                    if suffix in _PHOTO_EXTS:
+                        await self._app.bot.send_photo(chat_id=chat_id, photo=f)
+                    elif suffix in _VIDEO_EXTS:
+                        probe = _probe_video(file_path)
+                        await self._app.bot.send_video(
+                            chat_id=chat_id, video=f, supports_streaming=True,
+                            **probe,
+                        )
+                    elif suffix in _AUDIO_EXTS:
+                        await self._app.bot.send_audio(chat_id=chat_id, audio=f)
+                    else:
+                        await self._app.bot.send_document(chat_id=chat_id, document=f)
+                logger.debug(f"Sent media: {file_path}")
+                return
+            except (NetworkError, TimedOut) as e:
+                if attempt < _MEDIA_RETRIES - 1:
+                    wait = (attempt + 1) * 3
+                    logger.warning(
+                        f"Media send timeout (attempt {attempt + 1}/{_MEDIA_RETRIES}): "
+                        f"{file_path.name}, retrying in {wait}s"
                     )
-                elif suffix in _AUDIO_EXTS:
-                    await self._app.bot.send_audio(chat_id=chat_id, audio=f)
+                    await asyncio.sleep(wait)
                 else:
-                    await self._app.bot.send_document(chat_id=chat_id, document=f)
-            logger.debug(f"Sent media: {file_path}")
-        except Exception as e:
-            logger.error(f"Failed to send media {file_path}: {e}")
+                    logger.error(f"Failed to send media {file_path} after {_MEDIA_RETRIES} attempts: {e}")
+            except RetryAfter as e:
+                logger.warning(f"Rate limited, waiting {e.retry_after}s")
+                await asyncio.sleep(e.retry_after)
+            except Exception as e:
+                logger.error(f"Failed to send media {file_path}: {e}")
+                return
 
     async def _send_text(self, chat_id: int, content: str) -> None:
         """Send text with chunking, HTML formatting, and retry."""
