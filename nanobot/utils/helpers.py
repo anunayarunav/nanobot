@@ -3,6 +3,9 @@
 from pathlib import Path
 from datetime import datetime
 
+import aiohttp
+from loguru import logger
+
 
 def ensure_dir(path: Path) -> Path:
     """Ensure a directory exists, creating it if necessary."""
@@ -89,3 +92,17 @@ def parse_session_key(key: str) -> tuple[str, str]:
     if len(parts) != 2:
         raise ValueError(f"Invalid session key: {key}")
     return parts[0], parts[1]
+
+
+async def notify_admin(bot_token: str, chat_id: str, text: str) -> None:
+    """Send a Telegram message via bot token (for admin notifications)."""
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    try:
+        async with aiohttp.ClientSession() as session:
+            await session.post(url, json={
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "Markdown",
+            })
+    except Exception as e:
+        logger.warning(f"Failed to send admin notification: {e}")

@@ -149,6 +149,8 @@ class PaymentsConfig(BaseModel):
     webhook_base_path: str = ""        # e.g. "/interview-helper" for path-based routing
     success_url: str = ""              # e.g. https://t.me/bot_username
     cancel_url: str = ""
+    admin_chat_id: str = ""            # Telegram chat ID for payment notifications
+    admin_bot_token: str = ""           # Bot token for admin notifications (e.g. HQ bot)
 
 
 class CommandsConfig(BaseModel):

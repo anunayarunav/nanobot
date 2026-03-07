@@ -119,6 +119,19 @@ nanobot agent -m "Hi"   # Quick local smoke test
 nanobot gateway         # Full gateway with channels
 ```
 
+## Terminal Agents
+
+### Artisan Pi
+- **What:** AI production assistant for animated shows (image/video generation via Gemini + Veo 3.1)
+- **Repo:** `https://github.com/anunayarunav/artisan-pi.git`
+- **VPS path:** `~/artisan-pi` (clone + venv + npm install)
+- **Entry point:** `node src/main.js <project-dir>` — reads nanobot JSON envelope from stdin, emits JSONL frames on stdout
+- **Architecture:** Node.js adapter (nanobot protocol bridge) → Pi coding agent → Python CLI tools (`cli/`)
+- **Skill:** `nanobot/skills/artisan-pi/SKILL.md` — built-in skill so the master agent knows how to set up and route to it
+- **Deploy:** `./deploy.sh` in the artisan-pi repo (git push + VPS pull + deps)
+- **Terminal config:** `protocol: "rich"`, `passMedia: true`, `timeout: 1800`, providers need `gemini` API keys
+- **Differs from artisan (Claude SDK):** Uses Pi coding agent instead of Claude Agent SDK — no OAuth tokens needed, only Gemini keys
+
 ## Deployment
 
 - VPS: `deploy@clawd-bot.tail250fd7.ts.net`

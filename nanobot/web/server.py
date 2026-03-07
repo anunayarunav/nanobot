@@ -10,6 +10,7 @@ from loguru import logger
 from nanobot.bus.events import OutboundMessage
 from nanobot.config.schema import PaymentsConfig
 from nanobot.store.credits import CreditStore
+from nanobot.utils.helpers import notify_admin
 
 
 class WebhookServer:
@@ -130,3 +131,18 @@ class WebhookServer:
                 f"Send me your interview question to get started!"
             ),
         ))
+
+        # Notify admin via HQ bot
+        if self._config.admin_chat_id and self._config.admin_bot_token:
+            await notify_admin(
+                bot_token=self._config.admin_bot_token,
+                chat_id=self._config.admin_chat_id,
+                text=(
+                    f"💰 New payment!\n\n"
+                    f"Channel: {channel}\n"
+                    f"User: {chat_id}\n"
+                    f"Credits: {credits}\n"
+                    f"Amount: {amount_display}\n"
+                    f"New balance: {new_balance}"
+                ),
+            )

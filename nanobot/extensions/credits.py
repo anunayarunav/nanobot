@@ -5,6 +5,7 @@ from typing import Any
 from loguru import logger
 
 from nanobot.extensions.base import Extension, ExtensionContext
+from nanobot.utils.helpers import notify_admin
 
 
 class CreditExtension(Extension):
@@ -86,6 +87,17 @@ class CreditExtension(Extension):
                 f"New user {ctx.channel}:{ctx.chat_id} granted "
                 f"{self._config.free_credits} free credits"
             )
+            if self._config.admin_chat_id and self._config.admin_bot_token:
+                await notify_admin(
+                    bot_token=self._config.admin_bot_token,
+                    chat_id=self._config.admin_chat_id,
+                    text=(
+                        f"👋 New user!\n\n"
+                        f"Channel: {ctx.channel}\n"
+                        f"User: {ctx.chat_id}\n"
+                        f"Free credits: {self._config.free_credits}"
+                    ),
+                )
 
         if credits > 0:
             return None  # Proceed to LLM
