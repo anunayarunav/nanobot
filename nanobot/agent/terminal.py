@@ -113,6 +113,22 @@ def _build_input_envelope(
 
 
 # ---------------------------------------------------------------------------
+# Error visibility
+# ---------------------------------------------------------------------------
+
+def _should_reveal(config: TerminalConfig, chat_id: str) -> bool:
+    """Check if errors should be revealed based on config and chat_id."""
+    if config.reveal_errors is True:
+        return True
+    if isinstance(config.reveal_errors, list) and chat_id in config.reveal_errors:
+        return True
+    return False
+
+
+GENERIC_ERROR = "Something went wrong. Please try again later."
+
+
+# ---------------------------------------------------------------------------
 # JSONL frame parser (rich protocol)
 # ---------------------------------------------------------------------------
 
@@ -348,9 +364,10 @@ async def _execute_terminal_rich(
         )
     except Exception as e:
         logger.error(f"Failed to start terminal process: {e}")
+        detail = f"Failed to start: {e}" if _should_reveal(config, msg.chat_id) else GENERIC_ERROR
         return OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id,
-            content="Something went wrong. Please try again later.",
+            content=detail,
             error=True,
         )
 
@@ -430,9 +447,13 @@ async def _execute_terminal_rich(
                 code = frame.get("code", "")
                 error_text = frame.get("text", "Unknown error")
                 logger.error(f"Terminal error [{msg.session_key}]: {code} — {error_text}")
+                if _should_reveal(config, msg.chat_id):
+                    user_text = f"Error ({code}): {error_text}" if code else error_text
+                else:
+                    user_text = GENERIC_ERROR
                 final_message = OutboundMessage(
                     channel=msg.channel, chat_id=msg.chat_id,
-                    content="Something went wrong. Please try again later.",
+                    content=user_text,
                     error=True,
                 )
 
@@ -471,9 +492,10 @@ async def _execute_terminal_rich(
             f"Terminal process [{msg.session_key}] killed after {config.timeout}s timeout"
             f" (exit code {process.returncode})"
         )
+        detail = f"Process timed out after {config.timeout}s"
         timeout_msg = OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id,
-            content="Something went wrong. Please try again later.",
+            content=detail if _should_reveal(config, msg.chat_id) else GENERIC_ERROR,
             error=True,
         )
         if final_message is not None:
@@ -501,11 +523,13 @@ async def _execute_terminal_rich(
     # If we got accumulated plain text but no structured message, fall back
     if accumulated_text and final_message is None:
         if is_error:
-            # Non-zero exit with no message frame — hide internals
-            logger.error(f"Terminal failed [{msg.session_key}]: {chr(10).join(accumulated_text[:5])}")
+            # Non-zero exit with no message frame
+            plain_err = chr(10).join(accumulated_text[:5])
+            logger.error(f"Terminal failed [{msg.session_key}]: {plain_err}")
+            detail = f"Exit code {rc}\n{plain_err}" if _should_reveal(config, msg.chat_id) else GENERIC_ERROR
             final_message = OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id,
-                content="Something went wrong. Please try again later.",
+                content=detail,
                 error=True,
             )
         else:
@@ -521,9 +545,10 @@ async def _execute_terminal_rich(
         if is_error:
             if stderr:
                 logger.error(f"Terminal stderr [{msg.session_key}]: {stderr[:500]}")
+            detail = f"Exit code {rc}" + (f"\n{stderr[:500]}" if stderr else "") if _should_reveal(config, msg.chat_id) else GENERIC_ERROR
             final_message = OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id,
-                content="Something went wrong. Please try again later.",
+                content=detail,
                 error=True,
             )
         else:

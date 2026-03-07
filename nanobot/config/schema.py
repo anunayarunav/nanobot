@@ -190,6 +190,7 @@ class TerminalConfig(BaseModel):
     timeout: int = 120              # Subprocess timeout in seconds
     protocol: str = "plain"         # "plain" | "rich"
     pass_media: bool = True         # include user media paths in stdin JSON
+    reveal_errors: bool | list[str] = False  # True for all, or list of chat_ids
     env: dict[str, str] = Field(default_factory=dict)  # extra env vars
     providers: dict[str, TerminalProviderConfig] = Field(default_factory=dict)
 
