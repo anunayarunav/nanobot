@@ -26,7 +26,8 @@ _GROUPABLE_EXTS = _PHOTO_EXTS | _VIDEO_EXTS  # can go into a media group
 _TG_MAX_LENGTH = 4096
 _TG_MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB Telegram Bot API limit
 _SEND_RETRIES = 3
-_MEDIA_RETRIES = 2
+_MEDIA_RETRIES = 3
+_VIDEO_WRITE_TIMEOUT = 180  # seconds — generous for slow VPS uploads
 
 
 def _probe_video(path: Path) -> dict[str, int]:
@@ -339,28 +340,51 @@ class TelegramChannel(BaseChannel):
 
     async def _send_media_group(self, chat_id: int, files: list[Path]) -> None:
         """Send multiple photos/videos as a Telegram album."""
-        media_items = []
-        for p in files:
-            suffix = p.suffix.lower()
-            if suffix in _VIDEO_EXTS:
-                probe = _probe_video(p)
-                media_items.append(InputMediaVideo(
-                    media=open(p, "rb"), supports_streaming=True, **probe,
-                ))
-            else:
-                media_items.append(InputMediaPhoto(media=open(p, "rb")))
-        try:
-            await self._app.bot.send_media_group(chat_id=chat_id, media=media_items)
-            logger.debug(f"Sent media group ({len(files)} items) to {chat_id}")
-        except Exception as e:
-            logger.error(f"Failed to send media group: {e}")
-            # Fallback: send individually
+        has_video = any(p.suffix.lower() in _VIDEO_EXTS for p in files)
+        timeout_kw = (
+            {"write_timeout": _VIDEO_WRITE_TIMEOUT, "read_timeout": _VIDEO_WRITE_TIMEOUT}
+            if has_video else {}
+        )
+
+        def _build_items() -> list:
+            items = []
             for p in files:
-                await self._send_single_media(chat_id, p)
-        finally:
-            for item in media_items:
-                if hasattr(item.media, "close"):
-                    item.media.close()
+                suffix = p.suffix.lower()
+                if suffix in _VIDEO_EXTS:
+                    probe = _probe_video(p)
+                    items.append(InputMediaVideo(
+                        media=open(p, "rb"), supports_streaming=True, **probe,
+                    ))
+                else:
+                    items.append(InputMediaPhoto(media=open(p, "rb")))
+            return items
+
+        # Try sending the group with one retry before falling back
+        for attempt in range(2):
+            media_items = _build_items()
+            try:
+                await self._app.bot.send_media_group(
+                    chat_id=chat_id, media=media_items, **timeout_kw,
+                )
+                logger.debug(f"Sent media group ({len(files)} items) to {chat_id}")
+                return
+            except (NetworkError, TimedOut) as e:
+                if attempt == 0:
+                    logger.warning(f"Media group timed out, retrying in 5s: {e}")
+                    await asyncio.sleep(5)
+                else:
+                    logger.error(f"Media group failed after 2 attempts: {e}")
+            except Exception as e:
+                logger.error(f"Failed to send media group: {e}")
+                break
+            finally:
+                for item in media_items:
+                    if hasattr(item.media, "close"):
+                        item.media.close()
+
+        # Fallback: send individually
+        for p in files:
+            await self._send_single_media(chat_id, p)
 
     async def _send_single_media(self, chat_id: int, file_path: Path) -> None:
         """Send a single media file using the appropriate Telegram method.
@@ -394,16 +418,22 @@ class TelegramChannel(BaseChannel):
         self, chat_id: int, file_path: Path, suffix: str,
     ) -> None:
         """Send a single media file with retry on transient errors."""
+        is_video = suffix in _VIDEO_EXTS
+        # Videos get a much longer write timeout — VPS upload can be slow
+        timeout_kw = (
+            {"write_timeout": _VIDEO_WRITE_TIMEOUT, "read_timeout": _VIDEO_WRITE_TIMEOUT}
+            if is_video else {}
+        )
         for attempt in range(_MEDIA_RETRIES):
             try:
                 with open(file_path, "rb") as f:
                     if suffix in _PHOTO_EXTS:
                         await self._app.bot.send_photo(chat_id=chat_id, photo=f)
-                    elif suffix in _VIDEO_EXTS:
+                    elif is_video:
                         probe = _probe_video(file_path)
                         await self._app.bot.send_video(
                             chat_id=chat_id, video=f, supports_streaming=True,
-                            **probe,
+                            **probe, **timeout_kw,
                         )
                     elif suffix in _AUDIO_EXTS:
                         await self._app.bot.send_audio(chat_id=chat_id, audio=f)
@@ -413,7 +443,7 @@ class TelegramChannel(BaseChannel):
                 return
             except (NetworkError, TimedOut) as e:
                 if attempt < _MEDIA_RETRIES - 1:
-                    wait = (attempt + 1) * 3
+                    wait = (attempt + 1) * 5
                     logger.warning(
                         f"Media send timeout (attempt {attempt + 1}/{_MEDIA_RETRIES}): "
                         f"{file_path.name}, retrying in {wait}s"
