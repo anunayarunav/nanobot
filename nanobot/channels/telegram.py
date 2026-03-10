@@ -225,6 +225,7 @@ class TelegramChannel(BaseChannel):
         self.groq_api_key = groq_api_key
         self._app: Application | None = None
         self._chat_ids: dict[str, int] = {}  # Map sender_id to chat_id for replies
+        self._media_tasks: set[asyncio.Task] = set()  # background media uploads
     
     async def start(self) -> None:
         """Start the Telegram bot with long polling."""
@@ -277,9 +278,14 @@ class TelegramChannel(BaseChannel):
             await asyncio.sleep(1)
     
     async def stop(self) -> None:
-        """Stop the Telegram bot."""
+        """Stop the Telegram bot, waiting for in-flight media uploads."""
         self._running = False
-        
+
+        # Let pending media uploads finish (up to 30s)
+        if self._media_tasks:
+            logger.info(f"Waiting for {len(self._media_tasks)} media upload(s) to finish...")
+            await asyncio.wait(self._media_tasks, timeout=30)
+
         if self._app:
             logger.info("Stopping Telegram bot...")
             await self._app.updater.stop()
@@ -290,8 +296,8 @@ class TelegramChannel(BaseChannel):
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through Telegram, including media if provided.
 
-        Multiple photos/videos are batched into a media group (album).
-        Audio and documents are sent individually.
+        Text is sent immediately. Media uploads run in the background so
+        slow uploads don't block the outbound dispatcher.
         """
         if not self._app:
             logger.warning("Telegram bot not running")
@@ -303,16 +309,35 @@ class TelegramChannel(BaseChannel):
             logger.error(f"Invalid chat_id: {msg.chat_id}")
             return
 
-        # --- media ---
-        if msg.media:
-            groupable: list[Path] = []   # photos + videos → album
-            others: list[Path] = []      # audio, docs → sent individually
+        # --- text first (fast) ---
+        if msg.content:
+            await self._send_text(chat_id, msg.content)
 
-            for p_str in msg.media:
-                p = Path(p_str)
-                if not p.exists():
-                    logger.warning(f"Media file not found: {p}")
-                    continue
+        # --- media in background (may be slow) ---
+        if msg.media:
+            files = self._resolve_media(msg.media)
+            if files:
+                task = asyncio.create_task(self._upload_media(chat_id, files))
+                self._media_tasks.add(task)
+                task.add_done_callback(self._media_tasks.discard)
+
+    def _resolve_media(self, media: list[str]) -> list[Path]:
+        """Validate media paths and return existing files."""
+        files: list[Path] = []
+        for p_str in media:
+            p = Path(p_str)
+            if not p.exists():
+                logger.warning(f"Media file not found: {p}")
+                continue
+            files.append(p)
+        return files
+
+    async def _upload_media(self, chat_id: int, files: list[Path]) -> None:
+        """Upload media files in the background. Errors are logged, never raised."""
+        try:
+            groupable: list[Path] = []
+            others: list[Path] = []
+            for p in files:
                 if p.suffix.lower() in _GROUPABLE_EXTS:
                     groupable.append(p)
                 else:
@@ -329,10 +354,8 @@ class TelegramChannel(BaseChannel):
             # Send non-groupable items individually
             for p in others:
                 await self._send_single_media(chat_id, p)
-
-        # --- text ---
-        if msg.content:
-            await self._send_text(chat_id, msg.content)
+        except Exception as e:
+            logger.error(f"Background media upload failed for chat {chat_id}: {e}")
 
     # ------------------------------------------------------------------
     # Helpers
