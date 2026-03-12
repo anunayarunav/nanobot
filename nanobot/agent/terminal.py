@@ -28,6 +28,58 @@ from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.config.schema import TerminalConfig
 
 # ---------------------------------------------------------------------------
+# Injection handle (follow-up messages into a running subprocess)
+# ---------------------------------------------------------------------------
+
+
+class InjectionHandle:
+    """Handle for injecting messages into a running terminal subprocess stdin.
+
+    Created when a rich-protocol subprocess starts.  The agent loop holds a
+    reference and calls :meth:`inject` when the same user sends a follow-up
+    message while the subprocess is still running.
+    """
+
+    def __init__(
+        self, stdin: asyncio.StreamWriter, proc: asyncio.subprocess.Process,
+    ) -> None:
+        self._stdin = stdin
+        self._proc = proc
+        self._closed = False
+        self.last_inject_time: float = 0.0  # monotonic, for timeout extension
+
+    async def inject(self, text: str, media: list[str] | None = None) -> bool:
+        """Write an inject frame.  Returns *False* if process is dead or pipe broken."""
+        if self._closed or self._proc.returncode is not None:
+            return False
+        frame: dict[str, Any] = {"type": "inject", "version": 1, "text": text}
+        if media:
+            frame["media"] = media
+        try:
+            self._stdin.write(json.dumps(frame, ensure_ascii=False).encode("utf-8"))
+            self._stdin.write(b"\n")
+            await self._stdin.drain()
+            self.last_inject_time = asyncio.get_event_loop().time()
+            return True
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            self._closed = True
+            return False
+
+    def close(self) -> None:
+        """Close stdin.  Idempotent."""
+        if not self._closed:
+            self._closed = True
+            try:
+                self._stdin.close()
+            except Exception:
+                pass
+
+    @property
+    def is_alive(self) -> bool:
+        return not self._closed and self._proc.returncode is None
+
+
+# ---------------------------------------------------------------------------
 # Media detection (shared by plain mode and rich-mode fallback)
 # ---------------------------------------------------------------------------
 
@@ -337,6 +389,7 @@ async def _execute_terminal_rich(
     workspace: str,
     publish: Callable[[OutboundMessage], Awaitable[None]],
     cancel_event: asyncio.Event | None = None,
+    on_handle_ready: Callable[[InjectionHandle], None] | None = None,
 ) -> OutboundMessage | None:
     """Execute with the rich JSONL protocol.
 
@@ -375,15 +428,20 @@ async def _execute_terminal_rich(
     if cancel_event is not None:
         watcher = asyncio.create_task(_cancel_watcher(cancel_event, process))
 
-    # Write input envelope and close stdin
+    # Write input envelope (keep stdin open for injection in rich mode)
     assert process.stdin is not None
+    handle = InjectionHandle(process.stdin, process)
     try:
         process.stdin.write(stdin_data.encode("utf-8"))
         process.stdin.write(b"\n")
         await process.stdin.drain()
-        process.stdin.close()
     except Exception as e:
         logger.warning(f"Failed to write stdin: {e}")
+        handle.close()
+
+    # Register the handle so the agent loop can inject follow-up messages
+    if on_handle_ready is not None:
+        on_handle_ready(handle)
 
     # Stream stdout line-by-line
     accumulated_text: list[str] = []
@@ -395,6 +453,9 @@ async def _execute_terminal_rich(
         deadline = asyncio.get_event_loop().time() + config.timeout
 
         while True:
+            # Extend deadline when a follow-up message was injected
+            if handle.last_inject_time:
+                deadline = max(deadline, handle.last_inject_time + config.timeout)
             remaining = deadline - asyncio.get_event_loop().time()
             if remaining <= 0:
                 timed_out = True
@@ -468,6 +529,9 @@ async def _execute_terminal_rich(
 
     except Exception as e:
         logger.error(f"Error reading terminal stdout: {e}")
+
+    # Close stdin handle — subprocess is done or about to be killed
+    handle.close()
 
     # Clean up the cancel watcher
     if watcher is not None:
@@ -587,6 +651,7 @@ async def run_terminal_command(
     workspace: str,
     publish: Callable[[OutboundMessage], Awaitable[None]],
     cancel_event: asyncio.Event | None = None,
+    on_handle_ready: Callable[[InjectionHandle], None] | None = None,
 ) -> OutboundMessage | None:
     """Execute a terminal command using the configured protocol.
 
@@ -594,10 +659,15 @@ async def run_terminal_command(
     modes, a JSON input envelope is written to the subprocess's stdin.
     The subprocess ``cwd`` is the project root (parent of ``.nanobot``),
     not the workspace directory.
+
+    *on_handle_ready* (rich protocol only) is called with an
+    :class:`InjectionHandle` once the subprocess is running.  The caller
+    can use the handle to inject follow-up messages into the subprocess's
+    stdin while it is still running.
     """
     if config.protocol == "rich":
         return await _execute_terminal_rich(
-            msg, config, workspace, publish, cancel_event,
+            msg, config, workspace, publish, cancel_event, on_handle_ready,
         )
 
     # Plain mode — delegate to the original implementation

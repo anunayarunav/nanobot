@@ -46,7 +46,7 @@ The user sends a message on Telegram → nanobot runs your agent → your agent'
 
 ## Input: JSON Envelope on stdin
 
-Nanobot writes exactly one JSON object (followed by a newline) to the subprocess's stdin, then closes stdin. The envelope contains the user's message and session context.
+Nanobot writes exactly one JSON object (followed by a newline) to the subprocess's stdin. In **plain** mode, stdin is closed immediately. In **rich** mode, stdin remains open so that nanobot can write follow-up [inject frames](#message-injection) when the user sends additional messages while the subprocess is still running. The envelope contains the user's message and session context.
 
 ### Schema
 
@@ -99,13 +99,15 @@ envelope = json.loads(sys.stdin.readline())
 
 **Node.js:**
 ```javascript
-const chunks = [];
-process.stdin.on('data', c => chunks.push(c));
-process.stdin.on('end', () => {
-  const envelope = JSON.parse(Buffer.concat(chunks).toString());
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin });
+rl.once('line', (line) => {
+  const envelope = JSON.parse(line);
   // ... process envelope
 });
 ```
+
+> **Note:** Do not use the `stdin.on('end')` pattern — in rich mode, stdin stays open for [inject frames](#message-injection) and the `end` event won't fire until the process exits.
 
 **Bash:**
 ```bash
@@ -119,7 +121,7 @@ var envelope map[string]interface{}
 json.NewDecoder(os.Stdin).Decode(&envelope)
 ```
 
-If your program does not read stdin, it can ignore it — stdin is closed after writing and will not block the subprocess.
+If your program does not read stdin, it can ignore it — the initial envelope and any inject frames will accumulate in the OS pipe buffer without blocking the subprocess.
 
 ### Providers
 
@@ -268,6 +270,7 @@ Config lives in the bot's `config.json` under the `terminal` key. On disk, field
 | `passMedia` | `bool` | `true` | Include user's media file paths in the stdin JSON envelope. |
 | `env` | `object` | `{}` | Extra environment variables injected into the subprocess. Merged with the parent environment. |
 | `providers` | `object` | `{}` | LLM/API providers available to the micro-agent. Passed in the stdin envelope. See below. |
+| `allowInjection` | `bool` | `true` | Allow follow-up messages to be injected into a running rich-protocol subprocess. When `false`, follow-up messages queue until the current subprocess finishes. Has no effect on plain mode. |
 
 ### Provider configuration
 
@@ -478,11 +481,14 @@ except Exception as e:
 1. User sends a message on Telegram/Discord/etc.
 2. Nanobot builds the command from the `command` template.
 3. Subprocess is started with `stdin=PIPE, stdout=PIPE, stderr=PIPE`.
-4. JSON input envelope is written to stdin, then stdin is closed.
+4. JSON input envelope is written to stdin.
+   - **Plain mode**: stdin is closed immediately.
+   - **Rich mode**: stdin stays open for [inject frames](#message-injection).
 5. (Rich mode) stdout is read line-by-line. Frames are dispatched in real time.
 6. (Plain mode) Process runs to completion. stdout is captured whole.
-7. Process exits. stderr and exit code are captured.
-8. Final response is sent to the user's chat channel.
+7. If the user sends additional messages while the subprocess is running (rich mode only), nanobot writes inject frames to stdin. See [Message Injection](#message-injection).
+8. Process exits. stdin is closed. stderr and exit code are captured.
+9. Final response is sent to the user's chat channel.
 
 ### Timeout
 
@@ -498,6 +504,103 @@ A non-zero exit code is appended to the final response. In rich mode, prefer emi
 
 ---
 
+## Message Injection
+
+In **rich** mode, nanobot keeps stdin open after writing the initial envelope. When the user sends a follow-up message while the subprocess is still running, nanobot writes an **inject frame** to stdin instead of starting a new subprocess.
+
+This enables interactive micro-agents that can receive additional user input mid-execution — for example, a coding agent that accepts corrections, or a conversational agent that processes multi-turn dialogue within a single subprocess invocation.
+
+### Inject frame (stdin input)
+
+```json
+{"type": "inject", "version": 1, "text": "the follow-up message", "media": ["/path/to/file.jpg"]}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | `string` | yes | Always `"inject"`. |
+| `version` | `int` | yes | Protocol version (`1`). |
+| `text` | `string` | yes | The follow-up message text. |
+| `media` | `string[]` | no | Media file paths attached to the follow-up message. |
+
+Each inject frame is a single JSON line on stdin (same format as the initial envelope — one JSON object per line, terminated by `\n`).
+
+### Reading inject frames
+
+Injection support is **opt-in** for micro-agents. If your agent doesn't read stdin after the initial envelope, inject frames are silently buffered in the OS pipe. No changes are needed for existing agents.
+
+To support injection, set up a background stdin reader after reading the initial envelope:
+
+**Python:**
+```python
+import json, sys, threading, queue
+
+# Read initial envelope
+envelope = json.loads(sys.stdin.readline())
+
+# Set up injection listener
+inject_queue = queue.Queue()
+
+def _listen_stdin():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            frame = json.loads(line)
+            if frame.get("type") == "inject":
+                inject_queue.put(frame)
+        except json.JSONDecodeError:
+            pass
+
+threading.Thread(target=_listen_stdin, daemon=True).start()
+
+# In your main work loop, check for injected messages:
+try:
+    injected = inject_queue.get_nowait()
+    follow_up_text = injected["text"]
+    follow_up_media = injected.get("media", [])
+    # ... handle the follow-up ...
+except queue.Empty:
+    pass
+```
+
+**Node.js:**
+```javascript
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin });
+
+// Read initial envelope
+rl.once('line', (line) => {
+  const envelope = JSON.parse(line);
+  // ... start main work ...
+
+  // Listen for inject frames
+  rl.on('line', (injectLine) => {
+    const frame = JSON.parse(injectLine);
+    if (frame.type === 'inject') {
+      // ... handle follow-up message ...
+    }
+  });
+});
+```
+
+### Timeout extension
+
+Each injected message resets the subprocess timeout. For example, if the timeout is 120 seconds and a message is injected at t=100s, the new deadline becomes t=220s. This prevents long-running interactive sessions from being killed while the user is actively chatting.
+
+### Credit handling
+
+Each injected message goes through the normal credit gating hook (`pre_process`). If the user has no credits, the injection is blocked and the user receives a payment prompt — the running subprocess is not affected.
+
+### Backward compatibility
+
+- **Existing micro-agents** that read stdin once and ignore it: work unchanged. Inject frames accumulate in the pipe buffer harmlessly.
+- **`allowInjection: false`**: Disables injection entirely. Follow-up messages queue and start a new subprocess after the current one finishes (original behavior).
+- **Plain mode**: Injection is not supported. stdin is closed after the initial envelope as before.
+
+---
+
 ## Implementation
 
 The protocol is implemented in `nanobot/agent/terminal.py`. The entry point is `run_terminal_command()`, which routes to plain or rich mode based on config. The agent loop calls this from `agent/loop.py:_process_terminal_message()`.
@@ -508,3 +611,4 @@ Key functions:
 - `_execute_terminal_rich()` — streaming JSONL reader
 - `execute_terminal_command()` — plain mode (original behavior)
 - `run_terminal_command()` — unified entry point
+- `InjectionHandle` — manages stdin writes for follow-up message injection (rich mode)

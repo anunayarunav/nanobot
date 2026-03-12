@@ -124,6 +124,8 @@ class AgentLoop:
         self._running = False
         # Per-session processing tasks — allows concurrent users
         self._processing_tasks: dict[str, asyncio.Task[None]] = {}
+        # Per-session injection handles for running terminal subprocesses
+        self._injection_handles: dict[str, Any] = {}  # InjectionHandle
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -333,6 +335,35 @@ class AgentLoop:
 
                 sk = msg.session_key
 
+                # Check if we can inject into a running terminal subprocess
+                handle = self._injection_handles.get(sk)
+                if (
+                    is_terminal
+                    and handle
+                    and handle.is_alive
+                    and self.config.terminal.allow_injection
+                ):
+                    # Run credit gating hook before injection
+                    ctx = ExtensionContext(
+                        channel=msg.channel, chat_id=msg.chat_id,
+                        session_key=sk, workspace=str(self.workspace),
+                    )
+                    gated = await self.extensions.pre_process(msg, None, ctx)
+                    if gated is not None:
+                        await self.bus.publish_outbound(OutboundMessage(
+                            channel=msg.channel, chat_id=msg.chat_id,
+                            content=gated,
+                        ))
+                        continue
+
+                    # Inject into running subprocess
+                    media = list(msg.media) if msg.media else None
+                    injected = await handle.inject(msg.content, media)
+                    if injected:
+                        logger.info(f"Injected message into running terminal [{sk}]")
+                        continue
+                    # Injection failed (process died) — fall through to normal path
+
                 # Serialise within the same session (same user) so
                 # conversation history stays consistent
                 existing = self._processing_tasks.get(sk)
@@ -408,14 +439,22 @@ class AgentLoop:
         from nanobot.agent.terminal import run_terminal_command
 
         terminal_cfg = self.config.terminal
+        sk = msg.session_key
 
-        return await run_terminal_command(
-            msg=msg,
-            config=terminal_cfg,
-            workspace=str(self.workspace),
-            publish=self.bus.publish_outbound,
-            cancel_event=cancel_event,
-        )
+        def _register_handle(handle: Any) -> None:
+            self._injection_handles[sk] = handle
+
+        try:
+            return await run_terminal_command(
+                msg=msg,
+                config=terminal_cfg,
+                workspace=str(self.workspace),
+                publish=self.bus.publish_outbound,
+                cancel_event=cancel_event,
+                on_handle_ready=_register_handle,
+            )
+        finally:
+            self._injection_handles.pop(sk, None)
 
     async def _process_message(
         self, msg: InboundMessage, cancel_event: asyncio.Event | None = None,

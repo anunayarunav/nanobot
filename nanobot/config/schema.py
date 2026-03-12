@@ -193,6 +193,7 @@ class TerminalConfig(BaseModel):
     reveal_errors: bool | list[str] = False  # True for all, or list of chat_ids
     env: dict[str, str] = Field(default_factory=dict)  # extra env vars
     providers: dict[str, TerminalProviderConfig] = Field(default_factory=dict)
+    allow_injection: bool = True  # Allow follow-up messages during rich protocol execution
 
 
 class Config(BaseSettings):
