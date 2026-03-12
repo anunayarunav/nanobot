@@ -372,6 +372,7 @@ Enable terminal mode on an existing LLM project, or modify terminal settings.
    - `passMedia`: include user's media file paths in stdin JSON
    - `timeout`: subprocess timeout in seconds
    - `env`: extra environment variables merged into the subprocess
+   - `allowInjection`: (default `true`) when enabled, follow-up messages from the user are injected into the running subprocess's stdin as `{"type":"inject","version":1,"text":"..."}` frames instead of waiting for the current process to finish. Only works with `protocol: "rich"`. Set to `false` to queue follow-up messages until the subprocess exits.
 4. Restart: `sudo systemctl restart nanobot@{project}`
 5. Log:
    ```bash
