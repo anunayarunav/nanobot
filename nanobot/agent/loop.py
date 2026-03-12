@@ -20,6 +20,7 @@ from nanobot.agent.tools.history import HistorySearchTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
+from nanobot.agent.tools.parallel import ParallelTool
 from nanobot.agent.subagent import SubagentManager
 from nanobot.extensions.base import ExtensionContext
 from nanobot.extensions.manager import ExtensionManager
@@ -163,6 +164,9 @@ class AgentLoop:
         # Cron tool (for scheduling)
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+
+        # Parallel execution tool (fire-wait-resume)
+        self.tools.register(ParallelTool(registry=self.tools))
 
     def _make_progress_callback(
         self, channel: str, chat_id: str, session_key: str,
