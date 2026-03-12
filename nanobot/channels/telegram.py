@@ -25,6 +25,8 @@ _GROUPABLE_EXTS = _PHOTO_EXTS | _VIDEO_EXTS  # can go into a media group
 
 _TG_MAX_LENGTH = 4096
 _TG_MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB Telegram Bot API limit
+_VIDEO_PREVIEW_THRESHOLD = 10 * 1024 * 1024  # 10 MB — compress videos above this
+_VIDEO_PREVIEW_TARGET = 9 * 1024 * 1024       # ~9 MB target (with margin)
 _SEND_RETRIES = 3
 _MEDIA_RETRIES = 3
 _VIDEO_WRITE_TIMEOUT = 180  # seconds — generous for slow VPS uploads
@@ -62,11 +64,16 @@ def _probe_video(path: Path) -> dict[str, int]:
         return {}
 
 
-def _compress_video(path: Path, target_bytes: int = _TG_MAX_FILE_SIZE - 2 * 1024 * 1024) -> Path | None:
-    """Compress a video to fit within Telegram's upload limit using ffmpeg.
+def _compress_video(
+    path: Path,
+    target_bytes: int = _VIDEO_PREVIEW_TARGET,
+    max_height: int = 720,
+) -> Path | None:
+    """Compress a video to fit within *target_bytes* using ffmpeg.
 
-    Returns path to the compressed temp file, or None on failure.
-    The caller is responsible for deleting the temp file.
+    Applies bitrate reduction and resolution downscaling (capped at
+    *max_height*).  Returns path to the compressed temp file, or None
+    on failure.  The caller is responsible for deleting the temp file.
     """
     probe = _probe_video(path)
     duration = probe.get("duration", 0)
@@ -75,36 +82,52 @@ def _compress_video(path: Path, target_bytes: int = _TG_MAX_FILE_SIZE - 2 * 1024
         return None
 
     # Target bitrate (bits/s) = target_bytes * 8 / duration, leave room for audio
-    audio_bitrate = 128_000  # 128 kbps
+    audio_bitrate = 96_000  # 96 kbps — lower for preview
     video_bitrate = int((target_bytes * 8) / duration - audio_bitrate)
-    if video_bitrate < 200_000:  # below 200 kbps = unwatchable
-        logger.warning(f"Cannot compress {path}: would need < 200 kbps for {duration}s")
+    if video_bitrate < 100_000:  # below 100 kbps = unwatchable
+        logger.warning(f"Cannot compress {path}: would need < 100 kbps for {duration}s")
         return None
+
+    # Build ffmpeg command
+    cmd = ["ffmpeg", "-y", "-i", str(path)]
+
+    # Downscale if video height exceeds max_height (never upscale)
+    height = probe.get("height", 0)
+    if height > max_height:
+        cmd.extend(["-vf", f"scale=-2:{max_height}"])
+
+    cmd.extend([
+        "-c:v", "libx264", "-preset", "fast",
+        "-b:v", str(video_bitrate),
+        "-c:a", "aac", "-b:a", "96k",
+        "-movflags", "+faststart",
+    ])
 
     tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
     tmp.close()
+    cmd.append(tmp.name)
+
     try:
-        result = subprocess.run(
-            [
-                "ffmpeg", "-y", "-i", str(path),
-                "-c:v", "libx264", "-preset", "fast",
-                "-b:v", str(video_bitrate),
-                "-c:a", "aac", "-b:a", "128k",
-                "-movflags", "+faststart",
-                tmp.name,
-            ],
-            capture_output=True, text=True, timeout=600,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if result.returncode != 0:
             logger.error(f"ffmpeg compression failed: {result.stderr[:500]}")
             Path(tmp.name).unlink(missing_ok=True)
             return None
         compressed = Path(tmp.name)
+        compressed_size = compressed.stat().st_size
         logger.info(
             f"Compressed video {path.name}: "
             f"{path.stat().st_size / 1024 / 1024:.1f} MB → "
-            f"{compressed.stat().st_size / 1024 / 1024:.1f} MB"
+            f"{compressed_size / 1024 / 1024:.1f} MB"
         )
+        # Reject if still over the preview threshold
+        if compressed_size > _VIDEO_PREVIEW_THRESHOLD:
+            logger.warning(
+                f"Compressed video still {compressed_size / 1024 / 1024:.1f} MB "
+                f"(limit {_VIDEO_PREVIEW_THRESHOLD / 1024 / 1024:.0f} MB), skipping"
+            )
+            compressed.unlink(missing_ok=True)
+            return None
         return compressed
     except Exception as e:
         logger.error(f"ffmpeg compression error: {e}")
@@ -281,10 +304,10 @@ class TelegramChannel(BaseChannel):
         """Stop the Telegram bot, waiting for in-flight media uploads."""
         self._running = False
 
-        # Let pending media uploads finish (up to 30s)
+        # Let pending media uploads finish before tearing down
         if self._media_tasks:
             logger.info(f"Waiting for {len(self._media_tasks)} media upload(s) to finish...")
-            await asyncio.wait(self._media_tasks, timeout=30)
+            await asyncio.wait(self._media_tasks)
 
         if self._app:
             logger.info("Stopping Telegram bot...")
@@ -334,10 +357,32 @@ class TelegramChannel(BaseChannel):
 
     async def _upload_media(self, chat_id: int, files: list[Path]) -> None:
         """Upload media files in the background. Errors are logged, never raised."""
+        compressed_temps: list[Path] = []
         try:
+            # Pre-compress oversized videos (> 10 MB → preview under 10 MB)
+            processed: list[Path] = []
+            for p in files:
+                if (
+                    p.suffix.lower() in _VIDEO_EXTS
+                    and p.stat().st_size > _VIDEO_PREVIEW_THRESHOLD
+                ):
+                    logger.info(
+                        f"Video {p.name} is {p.stat().st_size / 1024 / 1024:.1f} MB "
+                        f"(> {_VIDEO_PREVIEW_THRESHOLD / 1024 / 1024:.0f} MB), compressing..."
+                    )
+                    compressed = _compress_video(p)
+                    if compressed:
+                        compressed_temps.append(compressed)
+                        processed.append(compressed)
+                    else:
+                        logger.warning(f"Skipping {p.name}: cannot compress under 10 MB")
+                        continue  # drop — user wants ≤ 10 MB only
+                else:
+                    processed.append(p)
+
             groupable: list[Path] = []
             others: list[Path] = []
-            for p in files:
+            for p in processed:
                 if p.suffix.lower() in _GROUPABLE_EXTS:
                     groupable.append(p)
                 else:
@@ -356,6 +401,9 @@ class TelegramChannel(BaseChannel):
                 await self._send_single_media(chat_id, p)
         except Exception as e:
             logger.error(f"Background media upload failed for chat {chat_id}: {e}")
+        finally:
+            for tmp in compressed_temps:
+                tmp.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -412,30 +460,19 @@ class TelegramChannel(BaseChannel):
     async def _send_single_media(self, chat_id: int, file_path: Path) -> None:
         """Send a single media file using the appropriate Telegram method.
 
-        Videos exceeding 50 MB are auto-compressed via ffmpeg before upload.
-        Transient timeouts are retried up to _MEDIA_RETRIES times.
+        Compression is handled upstream in _upload_media.  This method
+        only guards against files exceeding Telegram's hard 50 MB limit.
         """
         suffix = file_path.suffix.lower()
-        compressed: Path | None = None
 
-        # Auto-compress oversized videos
-        if suffix in _VIDEO_EXTS and file_path.stat().st_size > _TG_MAX_FILE_SIZE:
-            logger.info(
-                f"Video {file_path.name} is {file_path.stat().st_size / 1024 / 1024:.1f} MB "
-                f"(limit {_TG_MAX_FILE_SIZE / 1024 / 1024:.0f} MB), compressing..."
+        if file_path.stat().st_size > _TG_MAX_FILE_SIZE:
+            logger.error(
+                f"File {file_path.name} ({file_path.stat().st_size / 1024 / 1024:.1f} MB) "
+                f"exceeds Telegram limit, skipping"
             )
-            compressed = _compress_video(file_path)
-            if compressed:
-                file_path = compressed
-            else:
-                logger.error(f"Compression failed for {file_path}, skipping send")
-                return
+            return
 
-        try:
-            await self._send_single_media_inner(chat_id, file_path, suffix)
-        finally:
-            if compressed:
-                compressed.unlink(missing_ok=True)
+        await self._send_single_media_inner(chat_id, file_path, suffix)
 
     async def _send_single_media_inner(
         self, chat_id: int, file_path: Path, suffix: str,
